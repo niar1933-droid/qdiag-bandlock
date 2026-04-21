@@ -88,6 +88,13 @@ Java_com_qdiag_bandlock_diag_DiagNative_openDiag(JNIEnv *env, jclass clz) {
     return (diag_open() == 0) ? JNI_TRUE : JNI_FALSE;
 }
 
+JNIEXPORT jint JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_openDiagEx(JNIEnv *env, jclass clz) {
+    (void)env; (void)clz;
+    /* Returns 0 on success or -errno on failure. */
+    return (jint)diag_open();
+}
+
 JNIEXPORT void JNICALL
 Java_com_qdiag_bandlock_diag_DiagNative_closeDiag(JNIEnv *env, jclass clz) {
     (void)env; (void)clz;

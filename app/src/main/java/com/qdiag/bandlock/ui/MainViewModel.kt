@@ -205,20 +205,30 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun openDiag() = withApi {
-        if (it.openDiag()) {
-            toast("DIAG opened")
-        } else {
-            toast("DIAG open FAILED — run: magiskpolicy --live 'allow untrusted_app_* diag_device chr_file rw_file_perms' and chmod 666 /dev/diag")
-        }
+    private fun openDiagReason(api: IDiagRoot): String {
+        val rc = api.openDiagEx()
+        if (rc == 0) return "DIAG opened"
+        val e = -rc
+        return "DIAG open FAILED: ${errnoName(e)} (errno=$e) — ${openDiagHint(e)}"
     }
+
+    private fun openDiagHint(e: Int): String = when (e) {
+        2  -> "нет ноды /dev/diag (ядро без diagchar)"
+        13 -> "SELinux/DAC; нужен magiskpolicy + chmod 666 /dev/diag"
+        16 -> "устройство занято другим процессом (NSG, qcrild?)"
+        19 -> "нет модуля diagchar / устройство не зарегистрировано"
+        else -> "см. README раздел SELinux"
+    }
+
+    fun openDiag() = withApi { toast(openDiagReason(it)) }
     fun closeDiag() = withApi { it.closeDiag(); toast("DIAG closed") }
 
     /** Ensure DIAG is open; returns false with a descriptive toast otherwise. */
     private fun ensureDiagOpen(api: IDiagRoot): Boolean {
         if (api.isDiagOpen) return true
-        if (api.openDiag()) return true
-        toast("Cannot open /dev/diag. SELinux/permissions problem — see README.")
+        val reason = openDiagReason(api)
+        if (reason == "DIAG opened") return true
+        toast(reason)
         return false
     }
 

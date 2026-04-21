@@ -15,6 +15,7 @@ class DiagRootService : RootService() {
 
     private class Impl : IDiagRoot.Stub() {
         override fun openDiag(): Boolean = DiagNative.openDiag()
+        override fun openDiagEx(): Int = DiagNative.openDiagEx()
         override fun closeDiag() = DiagNative.closeDiag()
         override fun isDiagOpen(): Boolean = DiagNative.isDiagOpen()
 

@@ -13,6 +13,8 @@ object DiagNative {
     }
 
     @JvmStatic external fun openDiag(): Boolean
+    /** 0 on success, or -errno on failure (ENOENT/EACCES/ENODEV/EBUSY/…). */
+    @JvmStatic external fun openDiagEx(): Int
     @JvmStatic external fun closeDiag()
     @JvmStatic external fun isDiagOpen(): Boolean
 

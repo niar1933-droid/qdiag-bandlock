@@ -4,6 +4,9 @@ interface IDiagRoot {
     /** Open /dev/diag and switch logging to user-space / memory-device mode. */
     boolean openDiag();
 
+    /** Same as openDiag(), but returns 0 on success or -errno on failure. */
+    int openDiagEx();
+
     /** Close /dev/diag. */
     void closeDiag();
 
