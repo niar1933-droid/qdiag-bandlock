@@ -182,19 +182,16 @@ int qrtr_lookup(uint32_t service, uint32_t instance, int timeout_ms,
     return QRTR_RC_NO_SERVICE;
 }
 
-int qrtr_enumerate(qrtr_service_t *out, int cap, int timeout_ms) {
-    if (g_sock < 0) return QRTR_RC_NOT_OPEN;
-
-    /* Request a global lookup (service==0 means "everything"). */
-    int rc = send_new_lookup(0, 0);
-    if (rc < 0) return rc;
-
-    int count = 0;
+/* Drain any NEW_SERVER replies currently sitting on the socket into `out`.
+ * Stops on timeout OR sentinel (service=0,node=0,port=0). Returns number of
+ * entries seen (may exceed cap; cap only limits writes to `out`). */
+static int drain_new_server(qrtr_service_t *out, int cap, int *count,
+                            int timeout_ms) {
     struct pollfd pfd = { .fd = g_sock, .events = POLLIN };
     int elapsed = 0;
     while (elapsed < timeout_ms) {
         int poll_ms = timeout_ms - elapsed;
-        if (poll_ms > 300) poll_ms = 300;
+        if (poll_ms > 150) poll_ms = 150;
         int pr = poll(&pfd, 1, poll_ms);
         if (pr < 0) { save_errno(); return QRTR_RC_RECV_FAIL; }
         elapsed += poll_ms;
@@ -211,18 +208,76 @@ int qrtr_enumerate(qrtr_service_t *out, int cap, int timeout_ms) {
 
         const struct qrtr_ctrl_pkt *p = (const struct qrtr_ctrl_pkt *)buf;
         if (p->cmd != QRTR_TYPE_NEW_SERVER) continue;
-        if (p->service == 0 && p->node == 0 && p->port == 0) {
-            /* Sentinel "end of list". */
-            break;
+        if (p->service == 0 && p->node == 0 && p->port == 0) break;
+
+        /* De-dup against already-collected entries. */
+        int dup = 0;
+        for (int i = 0; i < *count && i < cap; i++) {
+            if (out[i].service  == p->service  &&
+                out[i].instance == p->instance &&
+                out[i].node     == p->node     &&
+                out[i].port     == p->port) { dup = 1; break; }
         }
-        if (count < cap) {
-            out[count].service  = p->service;
-            out[count].instance = p->instance;
-            out[count].node     = p->node;
-            out[count].port     = p->port;
+        if (dup) continue;
+
+        if (*count < cap) {
+            out[*count].service  = p->service;
+            out[*count].instance = p->instance;
+            out[*count].node     = p->node;
+            out[*count].port     = p->port;
         }
-        count++;
+        (*count)++;
     }
+    return QRTR_RC_OK;
+}
+
+/* Well-known QMI service IDs to probe when wildcard lookup under-reports
+ * (e.g. on HyperOS where ns filters modem-side services from app UID). */
+static const uint32_t PROBE_SERVICES[] = {
+    0x01,  /* WDS  - wireless data */
+    0x02,  /* DMS  - device management */
+    0x03,  /* NAS  - network access (band pref lives here) */
+    0x04,  /* QOS  */
+    0x05,  /* WMS  - wireless messaging */
+    0x06,  /* PDS  - position */
+    0x07,  /* AUTH */
+    0x09,  /* VOICE */
+    0x0A,  /* CAT  - card app toolkit */
+    0x0B,  /* UIM  */
+    0x0C,  /* PBM  */
+    0x10,  /* LOC  */
+    0x11,  /* SAR  */
+    0x1A,  /* IMSp */
+    0x1E,  /* DSD  - data services dormant */
+    0x24,  /* PDC  - persistent device configuration */
+    0x42,  /* IMSP - IMS presence */
+    0xE1,  /* RFSA - remote fs access (EFS over QRTR!) */
+    0x190  /* seen in dmesg wakeup reason */
+};
+#define N_PROBE_SERVICES (int)(sizeof(PROBE_SERVICES)/sizeof(PROBE_SERVICES[0]))
+
+int qrtr_enumerate(qrtr_service_t *out, int cap, int timeout_ms) {
+    if (g_sock < 0) return QRTR_RC_NOT_OPEN;
+
+    int count = 0;
+
+    /* Pass 1: wildcard lookup (catches ns-forwarded services). */
+    if (send_new_lookup(0, 0) == QRTR_RC_OK) {
+        int r = drain_new_server(out, cap, &count, timeout_ms / 3);
+        if (r < 0) return r;
+    }
+
+    /* Pass 2: probe specific well-known service IDs. Some kernels (HyperOS)
+     * only answer pointed lookups, not wildcards, especially for modem
+     * services. We share the remaining budget across all probes. */
+    int per_probe = timeout_ms / (N_PROBE_SERVICES + 2);
+    if (per_probe < 40) per_probe = 40;
+    for (int i = 0; i < N_PROBE_SERVICES; i++) {
+        if (send_new_lookup(PROBE_SERVICES[i], 0) != QRTR_RC_OK) continue;
+        int r = drain_new_server(out, cap, &count, per_probe);
+        if (r < 0) return r;
+    }
+
     return count;
 }
 

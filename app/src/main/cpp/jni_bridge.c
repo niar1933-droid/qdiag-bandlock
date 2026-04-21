@@ -426,7 +426,7 @@ Java_com_qdiag_bandlock_diag_DiagNative_qrtrEnumerate(JNIEnv *env, jclass clz) {
     if (!qrtr_is_open()) return (*env)->NewStringUTF(env, "qrtr not open");
 
     qrtr_service_t svcs[128];
-    int n = qrtr_enumerate(svcs, (int)(sizeof(svcs)/sizeof(svcs[0])), 2000);
+    int n = qrtr_enumerate(svcs, (int)(sizeof(svcs)/sizeof(svcs[0])), 4500);
     if (n < 0) {
         char msg[64];
         snprintf(msg, sizeof(msg), "enumerate rc=%d errno=%d", n, qrtr_last_errno());
