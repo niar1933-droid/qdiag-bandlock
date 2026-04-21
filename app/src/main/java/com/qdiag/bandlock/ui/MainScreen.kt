@@ -89,7 +89,7 @@ fun MainScreen(vm: MainViewModel) {
                 drawerContainerColor = NsgColors.Surface,
             ) {
                 Text(
-                    "QDiag Band Lock",
+                    "FoxikNetwork",
                     color = NsgColors.Accent,
                     fontWeight = FontWeight.Bold,
                     fontSize = 18.sp,
@@ -125,7 +125,7 @@ fun MainScreen(vm: MainViewModel) {
             snackbarHost = { SnackbarHost(snackbar) },
             topBar = {
                 TopAppBar(
-                    title = { Text("QDiag", color = NsgColors.Accent, fontWeight = FontWeight.Bold) },
+                    title = { Text("FoxikNetwork", color = NsgColors.Accent, fontWeight = FontWeight.Bold) },
                     navigationIcon = {
                         IconButton(onClick = { scope.launch { drawerState.open() } }) {
                             Icon(Icons.Default.Menu, "menu", tint = NsgColors.TextPrimary)

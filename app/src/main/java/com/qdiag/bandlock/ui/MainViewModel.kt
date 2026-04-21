@@ -288,7 +288,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun saveSnifferToFile() = withApi { api ->
         val dir = File(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-            "QDiag",
+            "FoxikNetwork",
         ).apply { mkdirs() }
         val ts = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
             .format(java.util.Date())
