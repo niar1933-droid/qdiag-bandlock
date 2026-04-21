@@ -63,24 +63,61 @@ class CellObserver(private val context: Context) {
             PackageManager.PERMISSION_GRANTED
 
     @SuppressLint("MissingPermission")
-    fun refresh() {
-        if (!hasLocationPermission()) {
-            _snapshots.value = emptyMap()
-            return
-        }
-        val all: List<CellInfo> = tm.allCellInfo ?: emptyList()
-
+    private fun publish(all: List<CellInfo>) {
         val lteCells = all.filterIsInstance<CellInfoLte>()
         val nrCells  = all.filterIsInstance<CellInfoNr>()
         val wcdmaCells = all.filterIsInstance<CellInfoWcdma>()
         val gsmCells = all.filterIsInstance<CellInfoGsm>()
 
-        val map = mutableMapOf<Rat, RatSnapshot>()
-        map[Rat.LTE]   = buildLte(lteCells)
-        map[Rat.NR]    = buildNr(nrCells)
-        map[Rat.WCDMA] = buildWcdma(wcdmaCells)
-        map[Rat.GSM]   = buildGsm(gsmCells)
-        _snapshots.value = map
+        _snapshots.value = mapOf(
+            Rat.LTE   to buildLte(lteCells),
+            Rat.NR    to buildNr(nrCells),
+            Rat.WCDMA to buildWcdma(wcdmaCells),
+            Rat.GSM   to buildGsm(gsmCells),
+        )
+    }
+
+    @SuppressLint("MissingPermission")
+    fun refresh() {
+        if (!hasLocationPermission()) {
+            _snapshots.value = emptyMap()
+            return
+        }
+        /*
+         * `tm.allCellInfo` returns the cached snapshot maintained by
+         * TelephonyRegistry — it only gets refreshed while some app is
+         * subscribed to cell-info updates. When nothing is listening, the
+         * cache freezes (this is why the numbers only moved while Network
+         * Signal Guru was running).
+         *
+         * Starting from API 29 we can ask for a fresh measurement with
+         * `requestCellInfoUpdate` — the modem will produce new CellInfo
+         * records asynchronously and we publish them as they arrive. We
+         * also publish the cached value immediately so the UI doesn't
+         * show empty while the request is in flight.
+         */
+        publish(tm.allCellInfo ?: emptyList())
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                tm.requestCellInfoUpdate(
+                    context.mainExecutor,
+                    object : TelephonyManager.CellInfoCallback() {
+                        override fun onCellInfo(cells: MutableList<CellInfo>) {
+                            if (hasLocationPermission()) publish(cells)
+                        }
+
+                        override fun onError(errorCode: Int, detail: Throwable?) {
+                            /* fall back to cached snapshot we already published */
+                        }
+                    },
+                )
+            } catch (_: SecurityException) {
+                /* missing permission; already published cache */
+            } catch (_: IllegalStateException) {
+                /* can be thrown if modem is temporarily unavailable */
+            }
+        }
     }
 
     private fun buildLte(list: List<CellInfoLte>): RatSnapshot {
