@@ -9,6 +9,7 @@ add_library(qdiag_native SHARED
         diag.c
         hdlc.c
         qmi_nas.c
+        sniffer.c
 )
 
 target_include_directories(qdiag_native PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

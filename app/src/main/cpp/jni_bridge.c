@@ -8,6 +8,11 @@
 #include "diag.h"
 #include "hdlc.h"
 #include "qmi_nas.h"
+#include "sniffer.h"
+
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 
 #define LOG_TAG "qdiag-jni"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -160,4 +165,68 @@ Java_com_qdiag_bandlock_diag_DiagNative_drainLog(JNIEnv *env, jclass clz) {
     }
     hex[hoff] = 0;
     return (*env)->NewStringUTF(env, hex);
+}
+
+/* ------------------------- DIAG sniffer ------------------------------- */
+
+JNIEXPORT jboolean JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_snifferStart(JNIEnv *env, jclass clz) {
+    (void)env; (void)clz;
+    return sniffer_start() == 0 ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_snifferStop(JNIEnv *env, jclass clz) {
+    (void)env; (void)clz;
+    sniffer_stop();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_snifferIsRunning(JNIEnv *env, jclass clz) {
+    (void)env; (void)clz;
+    return sniffer_is_running() ? JNI_TRUE : JNI_FALSE;
+}
+
+/**
+ * Returns a byte array containing one or more records of
+ *   [u32 len_le][len bytes of HDLC-decoded frame]
+ * concatenated together, up to ~64 KiB per drain. Returns an empty array
+ * if nothing is pending.
+ */
+JNIEXPORT jbyteArray JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_snifferDrain(JNIEnv *env, jclass clz) {
+    (void)clz;
+    static uint8_t staging[65536];
+    int nframes = 0;
+    size_t got = sniffer_drain(staging, sizeof(staging), &nframes);
+    jbyteArray out = (*env)->NewByteArray(env, (jsize)got);
+    if (!out) return NULL;
+    if (got) (*env)->SetByteArrayRegion(env, out, 0, (jsize)got, (const jbyte *)staging);
+    return out;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_snifferSaveTo(JNIEnv *env, jclass clz, jstring jpath) {
+    (void)clz;
+    const char *path = (*env)->GetStringUTFChars(env, jpath, NULL);
+    if (!path) return -1;
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    int saved_errno = errno;
+    (*env)->ReleaseStringUTFChars(env, jpath, path);
+    if (fd < 0) { LOGE("open %s failed: %d", path, saved_errno); return -saved_errno; }
+    int n = sniffer_save_to_fd(fd);
+    close(fd);
+    return n;
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_snifferTotal(JNIEnv *env, jclass clz) {
+    (void)env; (void)clz;
+    return (jlong)sniffer_total_frames();
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_snifferDropped(JNIEnv *env, jclass clz) {
+    (void)env; (void)clz;
+    return (jlong)sniffer_dropped_frames();
 }

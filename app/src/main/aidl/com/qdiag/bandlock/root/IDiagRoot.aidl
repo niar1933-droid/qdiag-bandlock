@@ -38,4 +38,28 @@ interface IDiagRoot {
 
     /** Drain pending DIAG log messages accumulated since last drain. Returns concatenated hex lines. */
     String drainDiagLog();
+
+    /* ---------- DIAG sniffer (raw HDLC-decoded frame capture) ---------- */
+
+    /** Start the background sniffer thread. /dev/diag must already be open. */
+    boolean startSniffer();
+
+    /** Stop the background sniffer thread and clear its buffer on next start. */
+    void stopSniffer();
+
+    boolean isSnifferRunning();
+
+    /**
+     * Drain pending captured frames as a packed record stream:
+     *   [u32 len_le][len bytes of decoded DIAG payload] ...
+     * Caller is expected to parse repeatedly on a background thread.
+     */
+    byte[] drainSniffer();
+
+    /** Append pending frames to a file path (must be world-writable or owned by root). */
+    int saveSniffer(String path);
+
+    /** Total frames captured since start (may exceed drained if overflow dropped some). */
+    long snifferTotal();
+    long snifferDropped();
 }

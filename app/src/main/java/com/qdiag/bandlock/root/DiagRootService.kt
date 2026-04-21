@@ -33,6 +33,14 @@ class DiagRootService : RootService() {
         override fun clearLteCellLock(): Int = DiagNative.clearLteCellLock()
         override fun resetBandPreference(): Int = DiagNative.resetBandPref()
         override fun drainDiagLog(): String = DiagNative.drainLog()
+
+        override fun startSniffer(): Boolean = DiagNative.snifferStart()
+        override fun stopSniffer() = DiagNative.snifferStop()
+        override fun isSnifferRunning(): Boolean = DiagNative.snifferIsRunning()
+        override fun drainSniffer(): ByteArray = DiagNative.snifferDrain()
+        override fun saveSniffer(path: String): Int = DiagNative.snifferSaveTo(path)
+        override fun snifferTotal(): Long = DiagNative.snifferTotal()
+        override fun snifferDropped(): Long = DiagNative.snifferDropped()
     }
 
     companion object { private const val TAG = "DiagRootService" }

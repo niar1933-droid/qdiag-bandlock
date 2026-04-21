@@ -108,8 +108,39 @@ chmod 666 /dev/diag
 Snapdragon 6xx/8xx до 2018 года) и некоторых IoT-модемов опкод отличается
 — поправьте константы в `qmi_nas.h` и пересоберите.
 
+> ⚠ **X70 (Snapdragon 8s Gen 3 / Poco F6): не подтверждено.**
+> На модеме X70 layout cell-lock-сообщения не опубликован. `0x4567`
+> здесь — placeholder; команда «Lock cell» скорее всего вернёт
+> ненулевой `rc`. Используйте встроенный **DIAG Sniffer** (см. ниже),
+> чтобы снять «Lock Cell»-операцию в Network Signal Guru на Poco F6 и
+> найти реальный opcode + layout в захваченных фреймах.
+
 TLV-layout самого `SET_SYSTEM_SELECTION_PREFERENCE` стабилен и
-совпадает с документацией libqmi.
+совпадает с документацией libqmi, поэтому **band preference** (LTE/NR)
+работает на всех QMI-модемах включая X70.
+
+## DIAG Sniffer (реверс-инжиниринг опкодов)
+
+Меню → **DIAG Sniffer**. Фоновый поток в рутовом сервисе читает
+`/dev/diag`, ресобирает HDLC-фреймы (CRC-16/X-25 + byte-stuffing) и
+складывает их в кольцевой буфер на 1 МБ. Интерфейс показывает
+последние ~500 фреймов: `#seq · SUBSYS_CMD/0xNN · N bytes · hex-превью`.
+
+Типичный сценарий для поиска X70 PCI-lock опкода:
+
+1. В QDiag: **Menu → DIAG Sniffer → Start**.
+2. В Network Signal Guru (или другой рабочей утилите) на том же
+   устройстве выполните **Lock Cell** с известным PCI/EARFCN.
+3. Вернитесь в QDiag → **Stop → Save**. Файл будет в
+   `/sdcard/Download/QDiag/qdiag_capture_<ts>.bin` (записи формата
+   `[u32 len_le][frame bytes]`).
+4. Сравните захваченные кадры типа `SUBSYS_CMD/0x1D` (QMI-over-DIAG) с
+   ожидаемыми параметрами — опкод и TLV станут очевидны.
+5. Пропишите найденный opcode в `app/src/main/cpp/qmi_nas.h`
+   (`QMI_NAS_SET_LTE_PCI_LOCK`) и пересоберите.
+
+Buffer overflow безопасен: при переполнении дропаются самые старые
+фреймы, а счётчик `dropped` виден в UI.
 
 ## Отладка
 

@@ -29,4 +29,19 @@ object DiagNative {
     @JvmStatic external fun setLteCellLock(earfcn: Int, pci: Int): Int
     @JvmStatic external fun clearLteCellLock(): Int
     @JvmStatic external fun drainLog(): String
+
+    /* ---------- DIAG sniffer (background HDLC-decoded frame capture) ---------- */
+
+    @JvmStatic external fun snifferStart(): Boolean
+    @JvmStatic external fun snifferStop()
+    @JvmStatic external fun snifferIsRunning(): Boolean
+
+    /** Drain up to ~64 KiB of pending frames, packed as [u32 len_le][frame bytes] records. */
+    @JvmStatic external fun snifferDrain(): ByteArray
+
+    /** Append pending frames to a file (same record format). Returns frames written, or -errno. */
+    @JvmStatic external fun snifferSaveTo(path: String): Int
+
+    @JvmStatic external fun snifferTotal(): Long
+    @JvmStatic external fun snifferDropped(): Long
 }

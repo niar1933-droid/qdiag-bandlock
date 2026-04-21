@@ -17,12 +17,19 @@
 
 /*
  * Known Qualcomm-internal / RPC opcodes observed in QXDM traces for
- * explicit PCI + EARFCN LTE cell lock. These numbers differ across modem
- * generations and are only correct for MDM9x07 / SDX5x / modern SDX
- * basebands; adjust for your target device if it does not accept them.
+ * explicit PCI + EARFCN LTE cell lock.
+ *
+ * !! UNVERIFIED for the X70 modem (Snapdragon 8s Gen 3 / Poco F6) !!
+ *
+ * These values were derived from traces on MDM9x07 / SDX5x / SDX65 and
+ * typically work on modems up through SDX65. On the X70 the layout is
+ * not publicly documented; the real opcode must be extracted by
+ * capturing a Network Signal Guru "Lock Cell" session with the in-app
+ * DIAG sniffer (see README → "DIAG Sniffer") and updating these
+ * constants.
  */
 #define QMI_NAS_LTE_CPHY_CA_IND      0x756F  /* CA/serving-cell info indication */
-#define QMI_NAS_SET_LTE_PCI_LOCK     0x4567  /* device-specific; see README */
+#define QMI_NAS_SET_LTE_PCI_LOCK     0x4567  /* unverified for X70; see README */
 #define QMI_NAS_CLEAR_LTE_PCI_LOCK   0x4568
 
 /* Sizes large enough for any request we construct here. */
