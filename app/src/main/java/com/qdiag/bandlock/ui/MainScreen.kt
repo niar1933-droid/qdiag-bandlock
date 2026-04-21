@@ -66,7 +66,7 @@ import com.qdiag.bandlock.telephony.Rat
 import com.qdiag.bandlock.telephony.RatSnapshot
 import kotlinx.coroutines.launch
 
-private enum class DrawerPanel { None, BandLock, CellLock, Sniffer, Log }
+private enum class DrawerPanel { None, BandLock, CellLock, NvInspector, Sniffer, Log }
 
 private val RAT_ORDER = listOf(Rat.GSM, Rat.WCDMA, Rat.LTE, Rat.NR)
 
@@ -102,6 +102,10 @@ fun MainScreen(vm: MainViewModel) {
                 }
                 DrawerRow("Cell Lock (LTE PCI)") {
                     activePanel = DrawerPanel.CellLock
+                    scope.launch { drawerState.close() }
+                }
+                DrawerRow("NV Inspector (EFS2)") {
+                    activePanel = DrawerPanel.NvInspector
                     scope.launch { drawerState.close() }
                 }
                 DrawerRow("DIAG Sniffer") {
@@ -165,11 +169,12 @@ fun MainScreen(vm: MainViewModel) {
                             .padding(12.dp),
                     ) {
                         when (activePanel) {
-                            DrawerPanel.BandLock -> BandLockPanel(state, vm)
-                            DrawerPanel.CellLock -> CellLockPanel(state, vm)
-                            DrawerPanel.Sniffer  -> SnifferPanel(state, vm)
-                            DrawerPanel.Log      -> LogPanel(state, vm)
-                            DrawerPanel.None     -> {}
+                            DrawerPanel.BandLock    -> BandLockPanel(state, vm)
+                            DrawerPanel.CellLock    -> CellLockPanel(state, vm)
+                            DrawerPanel.NvInspector -> NvInspectorPanel(state, vm)
+                            DrawerPanel.Sniffer     -> SnifferPanel(state, vm)
+                            DrawerPanel.Log         -> LogPanel(state, vm)
+                            DrawerPanel.None        -> {}
                         }
                     }
                 }
@@ -240,15 +245,23 @@ private fun BandLockPanel(state: UiState, vm: MainViewModel) {
         Spacer(Modifier.height(4.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
-                onClick = vm::applyBandPreference,
+                onClick = vm::applyBandPreferenceEfs,
                 enabled = !state.busy,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = NsgColors.Accent,
                     contentColor = Color.White,
                 ),
-            ) { Text("Apply", fontWeight = FontWeight.Bold) }
-            OutlinedButton(onClick = vm::resetBandPreference, enabled = !state.busy) { Text("Reset to ALL") }
+            ) { Text("Apply (EFS)", fontWeight = FontWeight.Bold) }
+            OutlinedButton(onClick = vm::applyBandPreference, enabled = !state.busy) { Text("Apply (QMI)") }
+            OutlinedButton(onClick = vm::resetBandPreference, enabled = !state.busy) { Text("Reset") }
         }
+        Text(
+            "Apply (EFS) uses NV-items via DIAG EFS2 — same path as NSG / Qct Modem Capabilities. " +
+                "Apply (QMI) uses QMI NAS (legacy fallback).",
+            color = NsgColors.TextLabel,
+            fontSize = 10.sp,
+            modifier = Modifier.padding(vertical = 4.dp),
+        )
         Spacer(Modifier.height(8.dp))
         LazyColumn {
             item {
@@ -467,6 +480,90 @@ private fun LogPanel(state: UiState, vm: MainViewModel) {
                 text = state.log.ifEmpty { "(no commands yet)" },
                 color = NsgColors.TextPrimary,
                 style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp),
+            )
+        }
+    }
+}
+
+/* ----------------------- NV Inspector panel ----------------------- */
+
+@Composable
+private fun NvInspectorPanel(state: UiState, vm: MainViewModel) {
+    Column(Modifier.fillMaxWidth()) {
+        Text(
+            "NV Inspector (EFS2)",
+            color = NsgColors.Accent,
+            fontWeight = FontWeight.Bold,
+            fontSize = 14.sp,
+        )
+        Text(
+            "Read/Write/Delete Qualcomm NV-items over DIAG EFS2. " +
+                "Same mechanism as NSG and Qct Modem Capabilities.",
+            color = NsgColors.TextLabel,
+            fontSize = 10.sp,
+            modifier = Modifier.padding(vertical = 2.dp),
+        )
+        Spacer(Modifier.height(4.dp))
+        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 110.dp)) {
+            items(NvPresets.ALL) { (label, path) ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 1.dp),
+                ) {
+                    OutlinedButton(
+                        onClick = { vm.setNvPath(path) },
+                        modifier = Modifier.width(84.dp),
+                    ) { Text("Pick", fontSize = 11.sp) }
+                    Spacer(Modifier.width(6.dp))
+                    Column {
+                        Text(label, color = NsgColors.TextPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text(path, color = NsgColors.TextDim, style = monoSmall)
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        OutlinedTextField(
+            value = state.nvPath,
+            onValueChange = vm::setNvPath,
+            label = { Text("NV path") },
+            modifier = Modifier.fillMaxWidth(),
+            textStyle = monoSmall,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Button(
+                onClick = vm::readNv,
+                enabled = !state.busy,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = NsgColors.Accent,
+                    contentColor = Color.White,
+                ),
+            ) { Text("Read", fontWeight = FontWeight.Bold) }
+            OutlinedButton(onClick = vm::deleteNv, enabled = !state.busy) { Text("Unlink") }
+            OutlinedButton(onClick = vm::writeNv, enabled = !state.busy) { Text("Write hex") }
+        }
+        OutlinedTextField(
+            value = state.nvWriteHex,
+            onValueChange = vm::setNvWriteHex,
+            label = { Text("Write payload (hex, e.g. 01 02 FF)") },
+            modifier = Modifier.fillMaxWidth(),
+            textStyle = monoSmall,
+        )
+        Spacer(Modifier.height(4.dp))
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(max = 140.dp)
+                .background(NsgColors.Background)
+                .padding(6.dp)
+                .verticalScroll(rememberScrollState()),
+        ) {
+            Text(
+                text = state.nvHex.ifEmpty { "(no NV item read yet)" },
+                color = NsgColors.TextPrimary,
+                style = monoSmall,
             )
         }
     }

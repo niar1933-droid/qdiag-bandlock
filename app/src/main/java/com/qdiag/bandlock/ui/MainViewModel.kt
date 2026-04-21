@@ -82,7 +82,30 @@ data class UiState(
     val snifferTotal: Long = 0,
     val snifferDropped: Long = 0,
     val snifferSavePath: String? = null,
+
+    /* NV inspector */
+    val nvPath: String = "/nv/item_files/modem/mmode/lte_bandpref",
+    val nvHex: String = "",
+    val nvWriteHex: String = "",
 )
+
+/** Well-known NV item paths exposed in the inspector UI. */
+object NvPresets {
+    val ALL: List<Pair<String, String>> = listOf(
+        "LTE band pref (1..64)"         to "/nv/item_files/modem/mmode/lte_bandpref",
+        "LTE band pref (65..256)"       to "/nv/item_files/modem/mmode/lte_bandpref_extn_65_256",
+        "NR SA band pref"               to "/nv/item_files/modem/mmode/nr_band_pref",
+        "NR NSA band pref"              to "/nv/item_files/modem/mmode/nr_nsa_band_pref",
+        "TDSCDMA band pref"             to "/nv/item_files/modem/mmode/tds_bandpref",
+        "LTE cell_restrict_opt_params"  to "/nv/item_files/modem/lte/rrc/efs/cell_restrict_opt_params",
+        "LTE camp_band_earfcn"          to "/nv/item_files/modem/lte/ML1/camp_band_earfcn",
+        "LTE CSP"                       to "/nv/item_files/modem/lte/rrc/csp",
+        "NR5G pci_lock_info"            to "/nv/item_files/modem/nr5g/RRC/pci_lock_info",
+        "NR5G earfcn_lock"              to "/nv/item_files/modem/nr5g/RRC/earfcn_lock",
+        "WCDMA freq lock"               to "/nv/item_files/wcdma/rrc/wcdma_rrc_freq_lock_item",
+        "WCDMA PSC lock"                to "/nv/item_files/wcdma/rrc/wcdma_rrc_enable_psc_lock",
+    )
+}
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val observer = CellObserver(app)
@@ -267,6 +290,104 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (!ensureDiagOpen(api)) return@withApi
         val rc = api.clearLteCellLock()
         toast("Clear cell lock → ${decodeRc(rc)}")
+    }
+
+    /* --------------------- EFS2-based band preference --------------------- */
+
+    /**
+     * Apply LTE+NR band preference by writing the standard Qualcomm NV items
+     * via EFS2 Put Item File. This is the same mechanism Network Signal Guru
+     * and Qct Modem Capabilities use; it works on all Qualcomm modems from
+     * SDX5x through X75 without per-modem opcode tuning.
+     *
+     * Layouts (documented in Qualcomm 80-V0345 / libqmi / QXDM specs):
+     *   lte_bandpref            : 8-byte little-endian bitmask (bit N-1 = band N, bands 1..64)
+     *   lte_bandpref_extn_65_256: 24-byte little-endian bitmask (bit N-65 = band N, bands 65..256)
+     *   nr_band_pref            : 32-byte little-endian bitmask (bit N-1 = band n(N+1), n1..n256)
+     *   nr_nsa_band_pref        : 32-byte bitmask, same layout as nr_band_pref
+     */
+    fun applyBandPreferenceEfs() = withApi { api ->
+        if (!ensureDiagOpen(api)) return@withApi
+        val s = _ui.value
+        val ltePayload = longToLeBytes(s.lteMask.low)                     // 8 bytes, bands 1..64
+        val rcLte = api.efsPutItemFile(EFS_LTE_BANDPREF, ltePayload)
+        toast("EFS lte_bandpref → ${decodeRc(rcLte)}")
+
+        /* NR band preference is 32 bytes (bits 0..255) */
+        val nrPayload = ByteArray(32)
+        for (b in 1..64) if (s.nrMask.contains(b)) setBit(nrPayload, b - 1)
+        val rcNr = api.efsPutItemFile(EFS_NR_BAND_PREF, nrPayload)
+        toast("EFS nr_band_pref → ${decodeRc(rcNr)}")
+    }
+
+    private fun longToLeBytes(v: Long): ByteArray {
+        val out = ByteArray(8)
+        for (i in 0 until 8) out[i] = ((v ushr (i * 8)) and 0xFF).toByte()
+        return out
+    }
+
+    private fun setBit(buf: ByteArray, bit: Int) {
+        if (bit < 0 || bit >= buf.size * 8) return
+        buf[bit / 8] = (buf[bit / 8].toInt() or (1 shl (bit % 8))).toByte()
+    }
+
+    /* --------------------- NV inspector --------------------- */
+
+    fun setNvPath(path: String) { _ui.value = _ui.value.copy(nvPath = path) }
+    fun setNvWriteHex(hex: String) { _ui.value = _ui.value.copy(nvWriteHex = hex) }
+
+    fun readNv() = withApi { api ->
+        if (!ensureDiagOpen(api)) return@withApi
+        val path = _ui.value.nvPath.trim()
+        if (path.isEmpty()) { toast("NV path is empty"); return@withApi }
+        val bytes = try { api.efsGetItemFile(path) } catch (t: Throwable) {
+            toast("Read error: ${t.message}"); null
+        }
+        if (bytes == null) {
+            toast("Read FAILED (item missing, modem rejected, or DIAG closed)")
+            _ui.value = _ui.value.copy(nvHex = "")
+        } else {
+            val hex = bytes.joinToString(" ") { "%02X".format(it.toInt() and 0xFF) }
+            _ui.value = _ui.value.copy(nvHex = "(${bytes.size}B) $hex")
+            toast("Read ${bytes.size} B from $path")
+        }
+    }
+
+    fun deleteNv() = withApi { api ->
+        if (!ensureDiagOpen(api)) return@withApi
+        val path = _ui.value.nvPath.trim()
+        if (path.isEmpty()) { toast("NV path is empty"); return@withApi }
+        val rc = api.efsUnlink(path)
+        toast("Unlink $path → ${decodeRc(rc)}")
+    }
+
+    fun writeNv() = withApi { api ->
+        if (!ensureDiagOpen(api)) return@withApi
+        val path = _ui.value.nvPath.trim()
+        val bytes = parseHex(_ui.value.nvWriteHex)
+        if (path.isEmpty() || bytes == null) {
+            toast("Invalid path or hex (use e.g. 01 02 FF)")
+            return@withApi
+        }
+        val rc = api.efsPutItemFile(path, bytes)
+        toast("Write ${bytes.size}B → $path : ${decodeRc(rc)}")
+    }
+
+    private fun parseHex(s: String): ByteArray? {
+        val cleaned = s.replace(Regex("[^0-9A-Fa-f]"), "")
+        if (cleaned.isEmpty() || cleaned.length % 2 != 0) return null
+        val out = ByteArray(cleaned.length / 2)
+        for (i in out.indices) {
+            out[i] = cleaned.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+        }
+        return out
+    }
+
+    companion object {
+        const val EFS_LTE_BANDPREF     = "/nv/item_files/modem/mmode/lte_bandpref"
+        const val EFS_LTE_BANDPREF_EXT = "/nv/item_files/modem/mmode/lte_bandpref_extn_65_256"
+        const val EFS_NR_BAND_PREF     = "/nv/item_files/modem/mmode/nr_band_pref"
+        const val EFS_NR_NSA_BAND_PREF = "/nv/item_files/modem/mmode/nr_nsa_band_pref"
     }
 
     /* --------------------- DIAG sniffer --------------------- */
