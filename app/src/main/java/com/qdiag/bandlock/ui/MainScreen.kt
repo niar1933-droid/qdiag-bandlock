@@ -21,6 +21,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -35,11 +37,14 @@ import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -72,6 +77,10 @@ fun MainScreen(vm: MainViewModel) {
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     var activePanel by remember { mutableStateOf(DrawerPanel.None) }
+    val snackbar = remember { SnackbarHostState() }
+    LaunchedEffect(vm) {
+        vm.toasts.collect { snackbar.showSnackbar(it) }
+    }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -113,6 +122,7 @@ fun MainScreen(vm: MainViewModel) {
     ) {
         Scaffold(
             containerColor = NsgColors.Background,
+            snackbarHost = { SnackbarHost(snackbar) },
             topBar = {
                 TopAppBar(
                     title = { Text("QDiag", color = NsgColors.Accent, fontWeight = FontWeight.Bold) },
@@ -229,8 +239,15 @@ private fun BandLockPanel(state: UiState, vm: MainViewModel) {
         }
         Spacer(Modifier.height(4.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilledTonalButton(onClick = vm::applyBandPreference) { Text("Apply") }
-            OutlinedButton(onClick = vm::resetBandPreference) { Text("Reset to ALL") }
+            Button(
+                onClick = vm::applyBandPreference,
+                enabled = !state.busy,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = NsgColors.Accent,
+                    contentColor = Color.White,
+                ),
+            ) { Text("Apply", fontWeight = FontWeight.Bold) }
+            OutlinedButton(onClick = vm::resetBandPreference, enabled = !state.busy) { Text("Reset to ALL") }
         }
         Spacer(Modifier.height(8.dp))
         LazyColumn {
@@ -314,8 +331,15 @@ private fun CellLockPanel(state: UiState, vm: MainViewModel) {
         }
         Spacer(Modifier.height(6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilledTonalButton(onClick = vm::applyCellLock) { Text("Lock") }
-            OutlinedButton(onClick = vm::clearCellLock) { Text("Unlock") }
+            Button(
+                onClick = vm::applyCellLock,
+                enabled = !state.busy,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = NsgColors.Accent,
+                    contentColor = Color.White,
+                ),
+            ) { Text("Lock", fontWeight = FontWeight.Bold) }
+            OutlinedButton(onClick = vm::clearCellLock, enabled = !state.busy) { Text("Unlock") }
         }
     }
 }
@@ -342,11 +366,19 @@ private fun SnifferPanel(state: UiState, vm: MainViewModel) {
             )
         }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            val snifferColors = ButtonDefaults.buttonColors(
+                containerColor = NsgColors.Accent,
+                contentColor = Color.White,
+            )
             if (!state.snifferRunning)
-                FilledTonalButton(onClick = vm::startSniffer) { Text("Start") }
+                Button(onClick = vm::startSniffer, enabled = !state.busy, colors = snifferColors) {
+                    Text("Start", fontWeight = FontWeight.Bold)
+                }
             else
-                FilledTonalButton(onClick = vm::stopSniffer) { Text("Stop") }
-            OutlinedButton(onClick = vm::saveSnifferToFile) { Text("Save") }
+                Button(onClick = vm::stopSniffer, enabled = !state.busy, colors = snifferColors) {
+                    Text("Stop", fontWeight = FontWeight.Bold)
+                }
+            OutlinedButton(onClick = vm::saveSnifferToFile, enabled = !state.busy) { Text("Save") }
             OutlinedButton(onClick = vm::clearSnifferUi) { Text("Clear") }
         }
         state.snifferSavePath?.let {
@@ -410,8 +442,14 @@ private fun LogPanel(state: UiState, vm: MainViewModel) {
                 modifier = Modifier.weight(1f),
             )
             val bound = state.apiBound
-            FilledTonalButton(onClick = vm::bindRootService) {
-                Text(if (bound) "Reconnect root" else "Connect root")
+            Button(
+                onClick = vm::bindRootService,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = NsgColors.Accent,
+                    contentColor = Color.White,
+                ),
+            ) {
+                Text(if (bound) "Reconnect root" else "Connect root", fontWeight = FontWeight.Bold)
             }
             Spacer(Modifier.width(6.dp))
             OutlinedButton(onClick = vm::openDiag) { Text("Open /dev/diag") }

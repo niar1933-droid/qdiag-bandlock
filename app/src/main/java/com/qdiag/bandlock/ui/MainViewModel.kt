@@ -12,9 +12,13 @@ import com.qdiag.bandlock.telephony.CellObserver
 import com.qdiag.bandlock.telephony.Rat
 import com.qdiag.bandlock.telephony.RatSnapshot
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -85,6 +89,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
+    /** One-shot snackbar events. */
+    private val _toasts = MutableSharedFlow<String>(
+        extraBufferCapacity = 8,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    val toasts: SharedFlow<String> = _toasts.asSharedFlow()
+
+    private fun toast(msg: String) {
+        _toasts.tryEmit(msg)
+        appendLog(msg)
+    }
+
     private var snifferSeq: Long = 0
 
     init {
@@ -142,38 +158,44 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun withApi(block: suspend (IDiagRoot) -> Unit) {
         val api = RootClient.api.value
         if (api == null) {
-            appendLog("Root service not bound yet. Binding now — retry the action in a second.")
+            toast("Root service not bound yet. Binding now — retry in a second.")
             RootClient.bind(getApplication())
             return
         }
         viewModelScope.launch {
             _ui.value = _ui.value.copy(busy = true)
             try {
-                withContext(Dispatchers.IO) { block(api) }
+                withContext(Dispatchers.IO) {
+                    block(api)
+                    val open = try { api.isDiagOpen } catch (_: Throwable) { false }
+                    _ui.value = _ui.value.copy(diagOpen = open)
+                }
             } catch (t: Throwable) {
                 Log.e("MainVm", "root call failed", t)
-                appendLog("Error: ${t.message}")
+                toast("Error: ${t.message}")
             } finally {
-                _ui.value = _ui.value.copy(busy = false, diagOpen = api.isDiagOpen)
+                _ui.value = _ui.value.copy(busy = false)
             }
         }
     }
 
-    fun openDiag()  = withApi { appendLog(if (it.openDiag()) "DIAG opened" else "DIAG open FAILED (check /dev/diag permissions)") }
-    fun closeDiag() = withApi { it.closeDiag(); appendLog("DIAG closed") }
+    fun openDiag() = withApi {
+        toast(if (it.openDiag()) "DIAG opened" else "DIAG open FAILED (check /dev/diag permissions + SELinux)")
+    }
+    fun closeDiag() = withApi { it.closeDiag(); toast("DIAG closed") }
 
     fun applyBandPreference() = withApi { api ->
         if (!api.isDiagOpen) api.openDiag()
         val s = _ui.value
         val rc = api.setBandPreference(s.lteMask.low, s.lteMask.high, s.nrMask.low, s.nrMask.high)
-        appendLog("setBandPreference(LTE=${s.lteMask.enabledBands()}, NR=${s.nrMask.enabledBands()}) -> rc=0x${rc.toString(16)}")
+        toast("Applied: LTE=${s.lteMask.enabledBands().size} NR=${s.nrMask.enabledBands().size} rc=0x${rc.toString(16)}")
     }
 
     fun resetBandPreference() = withApi { api ->
         if (!api.isDiagOpen) api.openDiag()
         val rc = api.resetBandPreference()
         _ui.value = _ui.value.copy(lteMask = BandMask.ALL, nrMask = BandMask.ALL)
-        appendLog("resetBandPreference -> rc=0x${rc.toString(16)}")
+        toast("Reset bands: rc=0x${rc.toString(16)}")
     }
 
     fun applyCellLock() = withApi { api ->
@@ -181,15 +203,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val s = _ui.value
         val earfcn = s.lockEarfcn.toIntOrNull()
         val pci = s.lockPci.toIntOrNull()
-        if (earfcn == null || pci == null) { appendLog("EARFCN and PCI must be integers"); return@withApi }
+        if (earfcn == null || pci == null) { toast("EARFCN and PCI must be integers"); return@withApi }
         val rc = api.setLteCellLock(earfcn, pci)
-        appendLog("setLteCellLock(EARFCN=$earfcn, PCI=$pci) -> rc=0x${rc.toString(16)}")
+        toast("Lock cell EARFCN=$earfcn PCI=$pci rc=0x${rc.toString(16)}")
     }
 
     fun clearCellLock() = withApi { api ->
         if (!api.isDiagOpen) api.openDiag()
         val rc = api.clearLteCellLock()
-        appendLog("clearLteCellLock -> rc=0x${rc.toString(16)}")
+        toast("Clear cell lock rc=0x${rc.toString(16)}")
     }
 
     /* --------------------- DIAG sniffer --------------------- */
@@ -202,13 +224,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             snifferRunning = ok && api.isSnifferRunning,
             snifferFrames = emptyList(),
         )
-        appendLog(if (ok) "Sniffer started" else "Sniffer start FAILED")
+        toast(if (ok) "Sniffer started" else "Sniffer start FAILED (DIAG not open?)")
     }
 
     fun stopSniffer() = withApi { api ->
         api.stopSniffer()
         _ui.value = _ui.value.copy(snifferRunning = api.isSnifferRunning)
-        appendLog("Sniffer stopped")
+        toast("Sniffer stopped")
     }
 
     fun clearSnifferUi() {
@@ -225,10 +247,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val path = File(dir, "qdiag_capture_$ts.bin").absolutePath
         val n = api.saveSniffer(path)
         if (n < 0) {
-            appendLog("saveSniffer($path) -> errno=${-n}")
+            toast("saveSniffer failed: errno=${-n}")
         } else {
             _ui.value = _ui.value.copy(snifferSavePath = path)
-            appendLog("Saved $n frames → $path")
+            toast("Saved $n bytes → $path")
         }
     }
 
