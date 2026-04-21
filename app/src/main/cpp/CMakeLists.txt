@@ -9,6 +9,7 @@ add_library(qdiag_native SHARED
         diag.c
         hdlc.c
         qmi_nas.c
+        efs2.c
         sniffer.c
 )
 

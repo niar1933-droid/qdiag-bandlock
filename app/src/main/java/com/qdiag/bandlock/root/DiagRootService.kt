@@ -33,6 +33,8 @@ class DiagRootService : RootService() {
         override fun setLteCellLock(earfcn: Int, pci: Int): Int = DiagNative.setLteCellLock(earfcn, pci)
         override fun clearLteCellLock(): Int = DiagNative.clearLteCellLock()
         override fun resetBandPreference(): Int = DiagNative.resetBandPref()
+        override fun efsPutItemFile(path: String, value: ByteArray): Int =
+            DiagNative.efsPutItemFile(path, value)
         override fun drainDiagLog(): String = DiagNative.drainLog()
 
         override fun startSniffer(): Boolean = DiagNative.snifferStart()

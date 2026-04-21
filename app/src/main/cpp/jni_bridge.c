@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include "diag.h"
+#include "efs2.h"
 #include "hdlc.h"
 #include "qmi_nas.h"
 #include "sniffer.h"
@@ -181,6 +182,55 @@ Java_com_qdiag_bandlock_diag_DiagNative_clearLteCellLock(JNIEnv *env, jclass clz
     size_t  len = qmi_nas_build_lte_cell_unlock(req);
     if (!len) return QDIAG_RC_BUILD_FAIL;
     return run_qmi(env, req, len);
+}
+
+/* ---------------- EFS2 NV writes (NSG-style lock) ---------------------- */
+
+/**
+ * Write a raw value into an EFS NV item via DIAG EFS2 Put Item File.
+ * Returns 0 on success, -errno or QDIAG_RC_* on transport failure, or
+ * diag_errno encoded as 0x20000|errno when the modem rejects the write.
+ */
+JNIEXPORT jint JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_efsPutItemFile(JNIEnv *env, jclass clz,
+                                                       jstring jpath, jbyteArray jval) {
+    (void)clz;
+    if (!diag_is_open()) return QDIAG_RC_NOT_OPEN;
+    if (!jpath || !jval) return QDIAG_RC_BUILD_FAIL;
+
+    const char *path = (*env)->GetStringUTFChars(env, jpath, NULL);
+    if (!path) return QDIAG_RC_BUILD_FAIL;
+    jsize vlen = (*env)->GetArrayLength(env, jval);
+    jbyte *vbuf = (*env)->GetByteArrayElements(env, jval, NULL);
+    if (!vbuf) {
+        (*env)->ReleaseStringUTFChars(env, jpath, path);
+        return QDIAG_RC_BUILD_FAIL;
+    }
+
+    uint8_t req[4096];
+    size_t  reqLen = efs2_build_put_item_file(req, sizeof(req), path,
+                                              (const uint8_t *)vbuf, (size_t)vlen);
+    (*env)->ReleaseByteArrayElements(env, jval, vbuf, JNI_ABORT);
+    (*env)->ReleaseStringUTFChars(env, jpath, path);
+    if (!reqLen) return QDIAG_RC_BUILD_FAIL;
+
+    int e1 = 0, e2 = 0;
+    jbyteArray ja = send_and_recv(env, req, reqLen, 2000, &e1, &e2);
+    if (!ja) {
+        if (e1 == QDIAG_RC_WRITE_FAIL || e1 == QDIAG_RC_READ_FAIL) return (jint)(e1 - e2);
+        return (jint)e1;
+    }
+    jsize jl = (*env)->GetArrayLength(env, ja);
+    jbyte *p = (*env)->GetByteArrayElements(env, ja, NULL);
+    uint16_t op = 0; int32_t derr = 0;
+    int prc = efs2_parse_response((const uint8_t *)p, (size_t)jl, &op, &derr);
+    (*env)->ReleaseByteArrayElements(env, ja, p, JNI_ABORT);
+    if (prc < 0)     return QDIAG_RC_BAD_FRAME;
+    if (derr != 0) {
+        LOGE("EFS2 Put Item File diag_errno=%d op=0x%04x", derr, op);
+        return (jint)(0x20000 | (derr & 0xFFFF));
+    }
+    return 0;
 }
 
 JNIEXPORT jstring JNICALL

@@ -30,6 +30,18 @@ object DiagNative {
     @JvmStatic external fun resetBandPref(): Int
     @JvmStatic external fun setLteCellLock(earfcn: Int, pci: Int): Int
     @JvmStatic external fun clearLteCellLock(): Int
+
+    /**
+     * Raw EFS2 Put Item File. Writes `value` into the NV item at `path`
+     * (e.g. "/nv/item_files/modem/nr5g/RRC/pci_lock_info"). Used to
+     * implement NSG-style PCI / cell / band lock once the exact byte
+     * layouts have been captured via the DIAG sniffer.
+     *
+     * @return 0 on success; negative on transport failure;
+     *         (0x20000 | diag_errno) if the modem rejected the write.
+     */
+    @JvmStatic external fun efsPutItemFile(path: String, value: ByteArray): Int
+
     @JvmStatic external fun drainLog(): String
 
     /* ---------- DIAG sniffer (background HDLC-decoded frame capture) ---------- */

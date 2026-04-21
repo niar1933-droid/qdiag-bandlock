@@ -39,6 +39,18 @@ interface IDiagRoot {
     /** Reset band preference to "all bands". */
     int resetBandPreference();
 
+    /**
+     * Raw EFS2 Put Item File — write `value` into the NV item at `path`
+     * (e.g. "/nv/item_files/modem/nr5g/RRC/pci_lock_info"). This is the
+     * mechanism used by Network Signal Guru / QXDM for PCI / cell / band
+     * lock. Exact byte layout of `value` is per-NV-item; capture one with
+     * the sniffer to learn the layout for your modem.
+     *
+     * Returns 0 on success, negative on transport failure, or
+     * (0x20000 | diag_errno) if the modem rejected the write.
+     */
+    int efsPutItemFile(String path, in byte[] value);
+
     /** Drain pending DIAG log messages accumulated since last drain. Returns concatenated hex lines. */
     String drainDiagLog();
 
