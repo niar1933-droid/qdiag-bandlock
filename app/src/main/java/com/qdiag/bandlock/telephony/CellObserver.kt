@@ -41,10 +41,14 @@ data class RatSnapshot(
     val channelDl: Int? = null,       // UARFCN / EARFCN / NRARFCN
     val channelUl: Int? = null,       // UL pair for WCDMA/LTE; null for NR
     val rssiDbm: Double? = null,      // Carrier RSSI / RSSI-like metric
+    val rsrpDbm: Double? = null,      // Serving-cell RSRP (LTE/NR)
+    val rsrqDb: Double? = null,       // Serving-cell RSRQ (LTE/NR)
+    val snrDb: Double? = null,        // RS-SNR (LTE) / SS-SINR (NR)
     val ueTxPower: Int? = null,
     val ulInterference: Int? = null,
     val uuSir: Double? = null,
     val trchBlerDl: Double? = null,
+    val timingAdvance: Int? = null,
     val mcc: String? = null,
     val mnc: String? = null,
     val tac: Int? = null,
@@ -146,6 +150,10 @@ class CellObserver(private val context: Context) {
             channelDl = earfcn,
             channelUl = earfcn?.let(::lteEarfcnDlToUl),
             rssiDbm = ss.rssi.takeIf { Build.VERSION.SDK_INT >= 29 && it != Int.MAX_VALUE }?.toDouble(),
+            rsrpDbm = ss.rsrp.takeIf { it != Int.MAX_VALUE }?.toDouble(),
+            rsrqDb  = ss.rsrq.takeIf { it != Int.MAX_VALUE }?.toDouble(),
+            snrDb   = ss.rssnr.takeIf { it != Int.MAX_VALUE }?.toDouble(),
+            timingAdvance = ss.timingAdvance.takeIf { it != Int.MAX_VALUE },
             mcc = id.mccString,
             mnc = id.mncString,
             tac = id.tac.takeIf { it != Int.MAX_VALUE },
@@ -180,6 +188,9 @@ class CellObserver(private val context: Context) {
             channelDl = nrarfcn,
             channelUl = null,
             rssiDbm = ss.ssRsrp.takeIf { it != Int.MAX_VALUE }?.toDouble(),
+            rsrpDbm = ss.ssRsrp.takeIf { it != Int.MAX_VALUE }?.toDouble(),
+            rsrqDb  = ss.ssRsrq.takeIf { it != Int.MAX_VALUE }?.toDouble(),
+            snrDb   = ss.ssSinr.takeIf { it != Int.MAX_VALUE }?.toDouble(),
             mcc = id.mccString,
             mnc = id.mncString,
             tac = id.tac.takeIf { it != Int.MAX_VALUE },

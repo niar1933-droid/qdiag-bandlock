@@ -47,6 +47,17 @@ fun signalColor(dbm: Double?): Color = when {
     else          -> NsgColors.SignalRed
 }
 
+/**
+ * Map a normalised "quality" fraction (1.0 = best, 0.0 = worst) to a
+ * smooth NSG-style green→lime→amber→red gauge colour.
+ */
+fun gaugeColor(fraction: Float): Color = when {
+    fraction >= 0.75f -> NsgColors.SignalGreen
+    fraction >= 0.50f -> NsgColors.SignalLime
+    fraction >= 0.25f -> NsgColors.SignalAmber
+    else              -> NsgColors.SignalRed
+}
+
 private val nsgColorScheme = darkColorScheme(
     primary            = NsgColors.Accent,
     onPrimary          = Color.White,

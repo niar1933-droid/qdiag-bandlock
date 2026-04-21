@@ -96,7 +96,114 @@ fun MetricRow(
 }
 
 /* ------------------------------------------------------------------ */
-/*  Signal bar — horizontal filled bar coloured by [signalColor].     */
+/*  Gauge row — NSG-style: label | coloured bar with value inside.    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A single bar with the numeric value overlaid inside it, like NSG
+ * shows for Carrier RSSI / TxPower / BLER / TA.
+ *
+ * [quality] is a 0..1 "how good" fraction that drives both the bar
+ * width and the colour ramp — callers translate whatever metric they
+ * have (RSRP dBm, BLER %, dBm TxPower, etc.) into that scale.
+ */
+@Composable
+fun GaugeBar(
+    value: String,
+    quality: Float?,
+    modifier: Modifier = Modifier,
+    barHeight: androidx.compose.ui.unit.Dp = 22.dp,
+) {
+    val clamped = quality?.coerceIn(0f, 1f)
+    val color = clamped?.let(::gaugeColor) ?: NsgColors.TextDim
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(barHeight)
+            .clip(RoundedCornerShape(3.dp))
+            .background(NsgColors.SurfaceElevated),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        if (clamped != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(clamped)
+                    .height(barHeight)
+                    .background(color),
+            )
+        }
+        Box(
+            modifier = Modifier.fillMaxWidth(),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                value,
+                style = MonoValue,
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+    }
+}
+
+/**
+ * Row: label on left, full-width gauge bar on right.
+ */
+@Composable
+fun GaugeRow(
+    label: String,
+    value: String,
+    quality: Float?,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            color = NsgColors.TextLabel,
+            fontSize = 13.sp,
+            modifier = Modifier.weight(1f),
+        )
+        GaugeBar(
+            value = value,
+            quality = quality,
+            modifier = Modifier.weight(1.2f),
+        )
+    }
+}
+
+/** Two narrow gauges side by side (e.g. PUSCH + PUCCH TxPower). */
+@Composable
+fun DualGaugeRow(
+    label: String,
+    leftValue: String,
+    leftQuality: Float?,
+    rightValue: String,
+    rightQuality: Float?,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            color = NsgColors.TextLabel,
+            fontSize = 13.sp,
+            modifier = Modifier.weight(1f),
+        )
+        GaugeBar(leftValue, leftQuality, modifier = Modifier.weight(0.6f))
+        Spacer(Modifier.width(6.dp))
+        GaugeBar(rightValue, rightQuality, modifier = Modifier.weight(0.6f))
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Signal bar — kept for backwards compat (thin bar, label + value). */
 /* ------------------------------------------------------------------ */
 
 @Composable
@@ -107,47 +214,20 @@ fun SignalBar(
     minDbm: Double = -120.0,
     maxDbm: Double = -40.0,
 ) {
-    val fraction = when {
-        dbm == null -> 0f
-        else -> ((dbm - minDbm) / (maxDbm - minDbm))
-            .coerceIn(0.0, 1.0).toFloat()
-    }
-    val color = signalColor(dbm)
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-    ) {
-        Row {
-            Text(
-                label,
-                color = NsgColors.TextLabel,
-                fontSize = 13.sp,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                dbm?.let { "${"%.0f".format(it)} $unit" } ?: "-",
-                style = MonoValue,
-                color = color,
-            )
-        }
-        Spacer(Modifier.height(4.dp))
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(6.dp)
-                .clip(RoundedCornerShape(3.dp))
-                .background(NsgColors.SurfaceElevated),
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth(fraction)
-                    .height(6.dp)
-                    .background(color),
-            )
-        }
-    }
+    val quality = dbm?.let { dbmQuality(it, worst = minDbm, best = maxDbm) }
+    val value = dbm?.let { "${"%.1f".format(it)} $unit" } ?: "-"
+    GaugeRow(label = label, value = value, quality = quality)
 }
+
+/**
+ * Convert a dBm-scale reading to a 0..1 "quality" fraction using a
+ * linear worst→best ramp. Works for both "higher is better" metrics
+ * (RSRP, RSSI, SNR) and "lower absolute value is better" (TxPower
+ * where a less-negative number still means the UE is pushing harder,
+ * so callers can flip worst/best to invert the ramp).
+ */
+fun dbmQuality(value: Double, worst: Double, best: Double): Float =
+    ((value - worst) / (best - worst)).coerceIn(0.0, 1.0).toFloat()
 
 /* ------------------------------------------------------------------ */
 /*  Cell table — header + rows of neighbours.                          */
@@ -182,13 +262,23 @@ fun CellTable(rat: Rat, rows: List<CellRow>) {
                 Text("— no cells —", color = NsgColors.TextDim, fontSize = 12.sp)
             }
         } else {
+            /* Per-RAT "worst..best" ramps for the inline gauge bars. */
+            val (aWorst, aBest) = when (rat) {
+                Rat.LTE, Rat.NR -> -20.0 to -5.0       // RSRQ
+                Rat.WCDMA       -> -24.0 to -3.0       // EcNo / Ec/Io
+                Rat.GSM         -> 0.0 to 60.0         // C1 (rough)
+            }
+            val (bWorst, bBest) = when (rat) {
+                Rat.LTE, Rat.NR -> -120.0 to -70.0     // RSRP
+                Rat.WCDMA       -> -120.0 to -60.0     // RSCP
+                Rat.GSM         -> -110.0 to -60.0     // RxLev dBm
+            }
             rows.forEach { r ->
-                val metricB = r.metricB
-                val rowColor = signalColor(metricB?.toDouble())
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 6.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
                         r.label,
@@ -209,18 +299,24 @@ fun CellTable(rat: Rat, rows: List<CellRow>) {
                         style = MonoValue,
                         modifier = Modifier.weight(1f),
                     )
-                    Text(
-                        r.metricA?.toString() ?: "-",
-                        color = NsgColors.TextPrimary,
-                        style = MonoValue,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Text(
-                        metricB?.toString() ?: "-",
-                        color = rowColor,
-                        style = MonoValue,
-                        modifier = Modifier.weight(1f),
-                    )
+                    Box(Modifier.weight(1f).padding(end = 2.dp)) {
+                        GaugeBar(
+                            value = r.metricA?.toString() ?: "-",
+                            quality = r.metricA?.toDouble()?.let {
+                                dbmQuality(it, worst = aWorst, best = aBest)
+                            },
+                            barHeight = 18.dp,
+                        )
+                    }
+                    Box(Modifier.weight(1f)) {
+                        GaugeBar(
+                            value = r.metricB?.toString() ?: "-",
+                            quality = r.metricB?.toDouble()?.let {
+                                dbmQuality(it, worst = bWorst, best = bBest)
+                            },
+                            barHeight = 18.dp,
+                        )
+                    }
                 }
             }
         }
@@ -255,8 +351,42 @@ fun RatPage(snap: RatSnapshot) {
         MetricRow("MCC / MNC",        if (snap.mcc != null) "${snap.mcc} / ${snap.mnc ?: "?"}" else null)
         MetricRow("TAC",              snap.tac?.toString())
         MetricRow("Cell ID",          snap.cellId?.toString())
-        SignalBar("Carrier RSSI",     snap.rssiDbm)
-        MetricRow("UE TxPower",       snap.ueTxPower?.let { "$it dBm" })
+        /*
+         * Gauge bars, like NSG. Quality scale is chosen per-metric from
+         * typical 3GPP operating ranges rather than from a fixed global
+         * scale — this matches NSG's visible behaviour where a weak
+         * RSRP of -95 shows yellow-orange, not ~50% green.
+         */
+        GaugeRow(
+            label = "Carrier RSSI",
+            value = snap.rssiDbm?.let { "${"%.1f".format(it)} dBm" } ?: "-",
+            quality = snap.rssiDbm?.let { dbmQuality(it, worst = -110.0, best = -40.0) },
+        )
+        GaugeRow(
+            label = "RSRP",
+            value = snap.rsrpDbm?.let { "${"%.1f".format(it)} dBm" } ?: "-",
+            quality = snap.rsrpDbm?.let { dbmQuality(it, worst = -120.0, best = -70.0) },
+        )
+        GaugeRow(
+            label = "RSRQ",
+            value = snap.rsrqDb?.let { "${"%.1f".format(it)} dB" } ?: "-",
+            quality = snap.rsrqDb?.let { dbmQuality(it, worst = -20.0, best = -5.0) },
+        )
+        GaugeRow(
+            label = if (snap.rat == Rat.NR) "SS-SINR" else "RS-SNR",
+            value = snap.snrDb?.let { "${"%.1f".format(it)} dB" } ?: "-",
+            quality = snap.snrDb?.let { dbmQuality(it, worst = -5.0, best = 20.0) },
+        )
+        snap.ueTxPower?.let {
+            GaugeRow(
+                label = "UE TxPower",
+                value = "$it dBm",
+                quality = dbmQuality(it.toDouble(), worst = 23.0, best = -30.0),
+            )
+        }
+        snap.timingAdvance?.let {
+            MetricRow("Timing Advance", it.toString())
+        }
         HorizontalDivider(color = NsgColors.Divider, thickness = 1.dp, modifier = Modifier.padding(vertical = 6.dp))
         Text(
             "Cells",
