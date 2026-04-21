@@ -23,10 +23,12 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/un.h>
@@ -52,6 +54,52 @@ const char *qmux_last_sockpath(void) { return g_sockpath; }
 
 /* ---------- socket open/close ---------- */
 
+/* Android AIDs used by the Qualcomm modem stack. qmuxd sets SO_PEERCRED on
+ * the listening socket and only accepts clients whose effective uid matches
+ * radio or system. Magisk root (uid=0) is rejected with a silent close(),
+ * which surfaces to us as EPIPE on the first write(). Drop euid/egid to
+ * AID_RADIO around connect() so the peer-cred check passes, then restore. */
+#define AID_SYSTEM 1000
+#define AID_RADIO  1001
+
+/* Best-effort drop: runs if we are root. If already non-root (e.g. running
+ * inside com.qdiag.bandlock itself) we just leave credentials alone; the
+ * caller will see the real error from connect/write. */
+static void qmux_drop_to_radio(uid_t *saved_euid, gid_t *saved_egid, int *dropped) {
+    *saved_euid = geteuid();
+    *saved_egid = getegid();
+    *dropped = 0;
+    if (*saved_euid != 0) return;  /* not root; nothing to do */
+
+    /* Keep CAP_* across euid transition so we can seteuid(0) back. */
+    prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0);
+
+    gid_t groups[] = { AID_RADIO, AID_SYSTEM };
+    if (setgroups(2, groups) < 0) {
+        LOGE("setgroups failed: %d (%s)", errno, strerror(errno));
+    }
+    if (setegid(AID_RADIO) < 0) {
+        LOGE("setegid(radio) failed: %d (%s)", errno, strerror(errno));
+        prctl(PR_SET_KEEPCAPS, 0, 0, 0, 0);
+        return;
+    }
+    if (seteuid(AID_RADIO) < 0) {
+        LOGE("seteuid(radio) failed: %d (%s)", errno, strerror(errno));
+        setegid(*saved_egid);
+        prctl(PR_SET_KEEPCAPS, 0, 0, 0, 0);
+        return;
+    }
+    *dropped = 1;
+    LOGI("qmux: euid/egid dropped to radio (uid=%d gid=%d)", geteuid(), getegid());
+}
+
+static void qmux_restore_euid(uid_t saved_euid, gid_t saved_egid, int dropped) {
+    if (!dropped) return;
+    if (seteuid(saved_euid) < 0) LOGE("seteuid restore failed: %d (%s)", errno, strerror(errno));
+    if (setegid(saved_egid) < 0) LOGE("setegid restore failed: %d (%s)", errno, strerror(errno));
+    prctl(PR_SET_KEEPCAPS, 0, 0, 0, 0);
+}
+
 static int try_connect(const char *path, int abstract) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) { save_errno(); return -1; }
@@ -69,8 +117,19 @@ static int try_connect(const char *path, int abstract) {
         sl = sizeof(sa);
     }
 
-    if (connect(fd, (struct sockaddr *)&sa, sl) < 0) {
+    uid_t saved_euid = 0; gid_t saved_egid = 0; int dropped = 0;
+    qmux_drop_to_radio(&saved_euid, &saved_egid, &dropped);
+
+    int crc = connect(fd, (struct sockaddr *)&sa, sl);
+    int cerr = errno;
+
+    qmux_restore_euid(saved_euid, saved_egid, dropped);
+
+    if (crc < 0) {
+        errno = cerr;
         save_errno();
+        LOGE("qmux connect('%s' abstract=%d) failed: %d (%s)",
+             path, abstract, cerr, strerror(cerr));
         close(fd);
         return -1;
     }
@@ -126,14 +185,33 @@ static int write_all(int fd, const void *buf, size_t len) {
     while (sent < len) {
         struct pollfd pfd = { .fd = fd, .events = POLLOUT };
         int pr = poll(&pfd, 1, 1000);
-        if (pr < 0) { if (errno == EINTR) continue; save_errno(); return -1; }
-        if (pr == 0) { g_last_errno = ETIMEDOUT; return -1; }
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            save_errno();
+            LOGE("qmux write_all: poll failed errno=%d (%s) after %zu/%zu",
+                 errno, strerror(errno), sent, len);
+            return -1;
+        }
+        if (pr == 0) {
+            g_last_errno = ETIMEDOUT;
+            LOGE("qmux write_all: poll timeout after %zu/%zu (revents=0x%x)",
+                 sent, len, pfd.revents);
+            return -1;
+        }
         ssize_t n = write(fd, p + sent, len - sent);
         if (n < 0) {
             if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
-            save_errno(); return -1;
+            save_errno();
+            LOGE("qmux write_all: write failed errno=%d (%s) after %zu/%zu",
+                 errno, strerror(errno), sent, len);
+            return -1;
         }
-        if (n == 0) { g_last_errno = EPIPE; return -1; }
+        if (n == 0) {
+            g_last_errno = EPIPE;
+            LOGE("qmux write_all: EOF after %zu/%zu (peer closed; likely qmuxd SO_PEERCRED rejected us)",
+                 sent, len);
+            return -1;
+        }
         sent += (size_t)n;
     }
     return 0;

@@ -164,7 +164,7 @@ fun MainScreen(vm: MainViewModel) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(max = 360.dp)
+                            .weight(1f, fill = true)
                             .background(NsgColors.Surface)
                             .padding(12.dp),
                     ) {
@@ -225,7 +225,7 @@ private fun RatPagerSection(state: UiState, modifier: Modifier = Modifier) {
 
 @Composable
 private fun BandLockPanel(state: UiState, vm: MainViewModel) {
-    Column(Modifier.fillMaxWidth()) {
+    Column(Modifier.fillMaxSize()) {
         Text(
             "Band preference",
             color = NsgColors.Accent,
@@ -269,7 +269,7 @@ private fun BandLockPanel(state: UiState, vm: MainViewModel) {
             Text("Enumerate QRTR services")
         }
         Spacer(Modifier.height(8.dp))
-        LazyColumn {
+        LazyColumn(Modifier.weight(1f, fill = true)) {
             item {
                 Text("LTE", color = NsgColors.TextLabel, fontSize = 12.sp, fontWeight = FontWeight.Bold)
             }
