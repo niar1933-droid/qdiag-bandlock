@@ -158,8 +158,13 @@ fun MainScreen(vm: MainViewModel) {
                     .fillMaxSize()
                     .background(NsgColors.Background),
             ) {
-                RatPagerSection(state, Modifier.weight(1f))
-                if (activePanel != DrawerPanel.None) {
+                /* When a drawer panel is open the operator is interacting with
+                 * band/cell/NV/sniffer content, so collapse the RAT pager to a
+                 * compact status strip and let the panel dominate. */
+                if (activePanel == DrawerPanel.None) {
+                    RatPagerSection(state, Modifier.weight(1f))
+                } else {
+                    RatPagerSection(state, Modifier.heightIn(max = 180.dp))
                     HorizontalDivider(color = NsgColors.Divider)
                     Box(
                         modifier = Modifier

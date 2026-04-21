@@ -263,21 +263,48 @@ static int qmux_send_frame(uint8_t svc, uint8_t cid,
     return QMUX_RC_OK;
 }
 
+/* Dump up to 64 bytes as hex to logcat under the `qmux` tag. */
+static void hexdump(const char *prefix, const uint8_t *buf, size_t len) {
+    char line[3 * 64 + 1];
+    size_t n = len > 64 ? 64 : len;
+    for (size_t i = 0; i < n; i++) {
+        snprintf(line + i * 3, 4, "%02X ", buf[i]);
+    }
+    line[n * 3] = '\0';
+    LOGI("%s [%zu bytes] %s%s", prefix, len, line, len > 64 ? "..." : "");
+}
+
 /* Receive one qmux frame. On success, copies SDU into `out` and returns
- * (svc, cid, sdu_len) via out-params. */
+ * (svc, cid, sdu_len) via out-params. On protocol error we hexdump what we
+ * got so the user can decode qmuxd's actual wire format. */
 static int qmux_recv_frame(uint8_t *out_svc, uint8_t *out_cid,
                            uint8_t *out, size_t out_cap, size_t *out_len,
                            int timeout_ms) {
     if (g_sock < 0) return QMUX_RC_NOT_OPEN;
     uint8_t hdr[6];
     if (read_exact(g_sock, hdr, 6, timeout_ms) < 0) return QMUX_RC_RECV_FAIL;
-    if (hdr[0] != 0x01) { LOGE("bad IFC 0x%02X", hdr[0]); return QMUX_RC_PROTO; }
+    if (hdr[0] != 0x01) {
+        LOGE("qmux bad IFC 0x%02X (expected 0x01)", hdr[0]);
+        hexdump("qmux bad-ifc hdr", hdr, 6);
+        /* Drain whatever else is pending so we can hexdump it and then
+         * close the socket (the peer is speaking a framing we don't
+         * recognise — subsequent requests on this fd are doomed). */
+        uint8_t drain[128];
+        struct pollfd pfd = { .fd = g_sock, .events = POLLIN };
+        if (poll(&pfd, 1, 50) > 0) {
+            ssize_t n = read(g_sock, drain, sizeof(drain));
+            if (n > 0) hexdump("qmux bad-ifc drain", drain, (size_t)n);
+        }
+        return QMUX_RC_PROTO;
+    }
     uint16_t total = (uint16_t)(hdr[1] | (hdr[2] << 8));
-    if (total < 5) return QMUX_RC_PROTO;
+    if (total < 5) { LOGE("qmux total_len=%u < 5", total); return QMUX_RC_PROTO; }
     size_t sdu_len = (size_t)total - 5;
     if (sdu_len > out_cap) return QMUX_RC_BUF_OVERFLOW;
     if (sdu_len && read_exact(g_sock, out, sdu_len, timeout_ms) < 0)
         return QMUX_RC_RECV_FAIL;
+    hexdump("qmux rx hdr", hdr, 6);
+    if (sdu_len) hexdump("qmux rx sdu", out, sdu_len);
     *out_svc = hdr[4];
     *out_cid = hdr[5];
     *out_len = sdu_len;
@@ -361,7 +388,7 @@ int qmux_alloc_client(uint8_t service_id, uint8_t *out_cid, int timeout_ms) {
     if (!sdu_len) return QMUX_RC_BUF_OVERFLOW;
 
     int rc = qmux_send_frame(QMUX_SVC_CTL, 0, sdu, sdu_len);
-    if (rc < 0) return rc;
+    if (rc < 0) { if (rc == QMUX_RC_PROTO || rc == QMUX_RC_SEND_FAIL) qmux_close(); return rc; }
 
     /* Receive until we see a CTL reply matching our txn id. */
     uint8_t rx[256];
@@ -371,7 +398,10 @@ int qmux_alloc_client(uint8_t service_id, uint8_t *out_cid, int timeout_ms) {
         size_t rlen = 0;
         int rr = qmux_recv_frame(&rsvc, &rcid, rx, sizeof(rx), &rlen,
                                  timeout_ms - elapsed);
-        if (rr < 0) return rr;
+        if (rr < 0) {
+            if (rr == QMUX_RC_PROTO || rr == QMUX_RC_RECV_FAIL) qmux_close();
+            return rr;
+        }
         elapsed += 50;
         if (rsvc != QMUX_SVC_CTL || rlen < 7) continue;
         /* CTL SDU: [flags][txn:1][msg:LE16][tlv_len:LE16][TLVs] */
@@ -434,7 +464,7 @@ int qmux_transact(uint8_t service_id, uint8_t client_id,
     uint16_t expect_txn = (uint16_t)(sdu[1] | (sdu[2] << 8));
 
     int rc = qmux_send_frame(service_id, client_id, sdu, sdu_len);
-    if (rc < 0) return rc;
+    if (rc < 0) { if (rc == QMUX_RC_PROTO || rc == QMUX_RC_SEND_FAIL) qmux_close(); return rc; }
 
     int elapsed = 0;
     while (elapsed < timeout_ms) {
@@ -442,7 +472,10 @@ int qmux_transact(uint8_t service_id, uint8_t client_id,
         size_t rlen = 0;
         int rr = qmux_recv_frame(&rsvc, &rcid, rx, rx_cap, &rlen,
                                  timeout_ms - elapsed);
-        if (rr < 0) return rr;
+        if (rr < 0) {
+            if (rr == QMUX_RC_PROTO || rr == QMUX_RC_RECV_FAIL) qmux_close();
+            return rr;
+        }
         elapsed += 50;
         if (rsvc != service_id) continue;
         if (rcid && rcid != client_id) continue;    /* broadcasts have cid=0 */
