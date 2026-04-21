@@ -47,6 +47,13 @@ class DiagRootService : RootService() {
         override fun saveSniffer(path: String): Int = DiagNative.snifferSaveTo(path)
         override fun snifferTotal(): Long = DiagNative.snifferTotal()
         override fun snifferDropped(): Long = DiagNative.snifferDropped()
+
+        override fun qrtrOpen(): Int = DiagNative.qrtrOpen()
+        override fun qrtrClose() = DiagNative.qrtrClose()
+        override fun qrtrIsOpen(): Boolean = DiagNative.qrtrIsOpen()
+        override fun qrtrEnumerate(): String = DiagNative.qrtrEnumerate()
+        override fun qrtrSetBandPref(lteLow: Long, lteHigh: Long, nrLow: Long, nrHigh: Long): Int =
+            DiagNative.qrtrSetBandPref(lteLow, lteHigh, nrLow, nrHigh)
     }
 
     companion object { private const val TAG = "DiagRootService" }

@@ -9,6 +9,7 @@
 #include "efs2.h"
 #include "hdlc.h"
 #include "qmi_nas.h"
+#include "qrtr.h"
 #include "sniffer.h"
 
 #include <errno.h>
@@ -381,4 +382,128 @@ JNIEXPORT jlong JNICALL
 Java_com_qdiag_bandlock_diag_DiagNative_snifferDropped(JNIEnv *env, jclass clz) {
     (void)env; (void)clz;
     return (jlong)sniffer_dropped_frames();
+}
+
+/* ========================================================================== */
+/* QRTR transport — AF_QIPCRTR socket; works without /dev/diag                */
+/* ========================================================================== */
+
+JNIEXPORT jint JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_qrtrOpen(JNIEnv *env, jclass clz) {
+    (void)env; (void)clz;
+    int rc = qrtr_open();
+    if (rc != 0) {
+        LOGE("qrtr_open rc=%d errno=%d (%s)", rc, qrtr_last_errno(), strerror(qrtr_last_errno()));
+        /* Encode errno into the rc so Kotlin can decode. */
+        int e = qrtr_last_errno();
+        if (e > 0) return -(2000 + e);
+        return rc;
+    }
+    return 0;
+}
+
+JNIEXPORT void JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_qrtrClose(JNIEnv *env, jclass clz) {
+    (void)env; (void)clz;
+    qrtr_close();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_qrtrIsOpen(JNIEnv *env, jclass clz) {
+    (void)env; (void)clz;
+    return qrtr_is_open() ? JNI_TRUE : JNI_FALSE;
+}
+
+/**
+ * Return a newline-separated string of advertised QRTR services, e.g.:
+ *   "svc=0x03 inst=0 node=0x05 port=0x1234"
+ *   ...
+ * Empty string on failure.
+ */
+JNIEXPORT jstring JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_qrtrEnumerate(JNIEnv *env, jclass clz) {
+    (void)clz;
+    if (!qrtr_is_open()) return (*env)->NewStringUTF(env, "qrtr not open");
+
+    qrtr_service_t svcs[128];
+    int n = qrtr_enumerate(svcs, (int)(sizeof(svcs)/sizeof(svcs[0])), 2000);
+    if (n < 0) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "enumerate rc=%d errno=%d", n, qrtr_last_errno());
+        return (*env)->NewStringUTF(env, msg);
+    }
+    char buf[8192];
+    size_t o = 0;
+    o += snprintf(buf + o, sizeof(buf) - o, "%d services:\n", n);
+    for (int i = 0; i < n && o < sizeof(buf) - 64; i++) {
+        o += snprintf(buf + o, sizeof(buf) - o,
+                      "svc=0x%02X inst=%u node=0x%02X port=0x%X\n",
+                      svcs[i].service, svcs[i].instance,
+                      svcs[i].node, svcs[i].port);
+    }
+    return (*env)->NewStringUTF(env, buf);
+}
+
+/**
+ * High-level helper: set LTE+NR band preference via QRTR (QMI NAS
+ * SET_SYSTEM_SELECTION_PREFERENCE = 0x0033). Returns 0 on success,
+ * (0x10000 | qmi_err) on modem rejection, or negative QRTR_RC_*.
+ */
+JNIEXPORT jint JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_qrtrSetBandPref(
+        JNIEnv *env, jclass clz,
+        jlong lteLow, jlong lteHigh, jlong nrLow, jlong nrHigh) {
+    (void)env; (void)clz;
+    if (!qrtr_is_open()) return QRTR_RC_NOT_OPEN;
+
+    uint32_t node = 0, port = 0;
+    int rc = qrtr_lookup(QMI_SVC_NAS, 0, 3000, &node, &port);
+    if (rc < 0) return rc;
+
+    /* Build TLVs for SET_SYSTEM_SELECTION_PREFERENCE. Same layout as over
+     * DIAG — the QMI TLV payload is transport-agnostic. */
+    uint8_t tlvs[128];
+    size_t  to = 0;
+
+    /* TLV 0x11 legacy band pref (8 bytes, bands 1..64) */
+    tlvs[to++] = 0x11;
+    tlvs[to++] = 0x08; tlvs[to++] = 0x00;
+    for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((lteLow >> (8*i)) & 0xFF);
+
+    /* TLV 0x12 mode pref (u16 LE = 0x00FF: all RATs) */
+    tlvs[to++] = 0x12;
+    tlvs[to++] = 0x02; tlvs[to++] = 0x00;
+    tlvs[to++] = 0xFF; tlvs[to++] = 0x00;
+
+    /* TLV 0x1C LTE band pref ext (16 bytes, bands 1..128) */
+    tlvs[to++] = 0x1C;
+    tlvs[to++] = 0x10; tlvs[to++] = 0x00;
+    for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((lteLow  >> (8*i)) & 0xFF);
+    for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((lteHigh >> (8*i)) & 0xFF);
+
+    /* TLV 0x24 NR5G SA band pref (16 bytes) */
+    tlvs[to++] = 0x24;
+    tlvs[to++] = 0x10; tlvs[to++] = 0x00;
+    for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((nrLow  >> (8*i)) & 0xFF);
+    for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((nrHigh >> (8*i)) & 0xFF);
+
+    /* TLV 0x25 NR5G NSA band pref (16 bytes) */
+    tlvs[to++] = 0x25;
+    tlvs[to++] = 0x10; tlvs[to++] = 0x00;
+    for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((nrLow  >> (8*i)) & 0xFF);
+    for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((nrHigh >> (8*i)) & 0xFF);
+
+    uint8_t req[256];
+    size_t reqLen = qrtr_build_qmi_request(req, sizeof(req), 0x0033, tlvs, to);
+    if (!reqLen) return QDIAG_RC_BUILD_FAIL;
+
+    uint8_t rx[2048];
+    int n = qrtr_transact(node, port, req, reqLen, rx, sizeof(rx), 5000);
+    if (n < 0) return n;
+
+    uint16_t mid = 0, result = 0xFFFF, err = 0xFFFF;
+    int prc = qrtr_parse_qmi_response(rx, (size_t)n, &mid, &result, &err);
+    if (prc < 0) return QDIAG_RC_BAD_FRAME;
+    if (result != 0) return (jint)(0x10000 | err);
+    return 0;
 }

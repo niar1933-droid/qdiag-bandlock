@@ -84,4 +84,17 @@ interface IDiagRoot {
     /** Total frames captured since start (may exceed drained if overflow dropped some). */
     long snifferTotal();
     long snifferDropped();
+
+    /* ---------- QRTR transport (AF_QIPCRTR socket, no /dev/diag) ---------- */
+
+    /** Open AF_QIPCRTR socket. 0 on success, -(2000+errno) on failure. */
+    int qrtrOpen();
+    void qrtrClose();
+    boolean qrtrIsOpen();
+
+    /** Multi-line dump of all QMI services currently advertised on QRTR. */
+    String qrtrEnumerate();
+
+    /** Apply LTE+NR band preference via QMI NAS over QRTR (no /dev/diag). */
+    int qrtrSetBandPref(long lteLow, long lteHigh, long nrLow, long nrHigh);
 }

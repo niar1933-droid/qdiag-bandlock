@@ -245,23 +245,27 @@ private fun BandLockPanel(state: UiState, vm: MainViewModel) {
         Spacer(Modifier.height(4.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
-                onClick = vm::applyBandPreferenceEfs,
+                onClick = vm::applyBandPreferenceQrtr,
                 enabled = !state.busy,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = NsgColors.Accent,
                     contentColor = Color.White,
                 ),
-            ) { Text("Apply (EFS)", fontWeight = FontWeight.Bold) }
-            OutlinedButton(onClick = vm::applyBandPreference, enabled = !state.busy) { Text("Apply (QMI)") }
+            ) { Text("Apply (QRTR)", fontWeight = FontWeight.Bold) }
+            OutlinedButton(onClick = vm::applyBandPreferenceEfs, enabled = !state.busy) { Text("EFS") }
+            OutlinedButton(onClick = vm::applyBandPreference, enabled = !state.busy) { Text("DIAG") }
             OutlinedButton(onClick = vm::resetBandPreference, enabled = !state.busy) { Text("Reset") }
         }
         Text(
-            "Apply (EFS) uses NV-items via DIAG EFS2 — same path as NSG / Qct Modem Capabilities. " +
-                "Apply (QMI) uses QMI NAS (legacy fallback).",
+            "Apply (QRTR) — AF_QIPCRTR socket, работает БЕЗ /dev/diag (правильный путь " +
+                "для HyperOS/MIUI без diagchar). EFS — NV-items через DIAG EFS2. DIAG — QMI-over-DIAG.",
             color = NsgColors.TextLabel,
             fontSize = 10.sp,
             modifier = Modifier.padding(vertical = 4.dp),
         )
+        OutlinedButton(onClick = vm::enumerateQrtr, enabled = !state.busy) {
+            Text("Enumerate QRTR services")
+        }
         Spacer(Modifier.height(8.dp))
         LazyColumn {
             item {

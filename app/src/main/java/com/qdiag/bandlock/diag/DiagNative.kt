@@ -61,6 +61,23 @@ object DiagNative {
 
     @JvmStatic external fun drainLog(): String
 
+    /* ---------- QRTR transport (AF_QIPCRTR, no /dev/diag needed) ---------- */
+
+    /** Open AF_QIPCRTR socket. Returns 0 on success; negative on error.
+     *  `-(2000 + errno)` encodes the underlying errno (e.g. -2013 = EACCES). */
+    @JvmStatic external fun qrtrOpen(): Int
+    @JvmStatic external fun qrtrClose()
+    @JvmStatic external fun qrtrIsOpen(): Boolean
+
+    /** Returns a multi-line dump of all QMI services currently advertised on QRTR. */
+    @JvmStatic external fun qrtrEnumerate(): String
+
+    /** Apply LTE+NR band preference via QMI NAS over QRTR (bypasses /dev/diag).
+     *  Same return convention as setBandPreference() over DIAG. */
+    @JvmStatic external fun qrtrSetBandPref(
+        lteLow: Long, lteHigh: Long, nrLow: Long, nrHigh: Long,
+    ): Int
+
     /* ---------- DIAG sniffer (background HDLC-decoded frame capture) ---------- */
 
     @JvmStatic external fun snifferStart(): Boolean

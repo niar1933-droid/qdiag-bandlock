@@ -306,6 +306,43 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      *   nr_band_pref            : 32-byte little-endian bitmask (bit N-1 = band n(N+1), n1..n256)
      *   nr_nsa_band_pref        : 32-byte bitmask, same layout as nr_band_pref
      */
+    /**
+     * Apply band preference via QRTR (AF_QIPCRTR socket) — works on kernels
+     * WITHOUT `/dev/diag` (e.g. Poco F6 / HyperOS). Opens the QRTR socket on
+     * demand, looks up QMI NAS service, sends SET_SYSTEM_SELECTION_PREFERENCE.
+     */
+    fun applyBandPreferenceQrtr() = withApi { api ->
+        if (!api.qrtrIsOpen()) {
+            val rc = api.qrtrOpen()
+            if (rc != 0) {
+                val hint = when (rc) {
+                    -2013 -> "EACCES (SELinux запрещает AF_QIPCRTR; см. magiskpolicy ниже)"
+                    -2001 -> "EPERM (нет root)"
+                    -2097 -> "EAFNOSUPPORT (ядро без CONFIG_QRTR)"
+                    else  -> "rc=$rc"
+                }
+                toast("QRTR open FAILED: $hint")
+                return@withApi
+            }
+            toast("QRTR socket opened")
+        }
+        val s = _ui.value
+        val rc = api.qrtrSetBandPref(s.lteMask.low, s.lteMask.high, s.nrMask.low, s.nrMask.high)
+        toast("QRTR band pref: LTE=${s.lteMask.enabledBands().size} " +
+              "NR=${s.nrMask.enabledBands().size} → ${decodeRc(rc)}")
+    }
+
+    /** Enumerate QMI services on QRTR (diagnostic). Logs to command log. */
+    fun enumerateQrtr() = withApi { api ->
+        if (!api.qrtrIsOpen()) {
+            val rc = api.qrtrOpen()
+            if (rc != 0) { toast("QRTR open FAILED rc=$rc"); return@withApi }
+        }
+        val dump = api.qrtrEnumerate()
+        appendLog("--- QRTR services ---\n$dump")
+        toast("Enumerated QMI services (см. Command log)")
+    }
+
     fun applyBandPreferenceEfs() = withApi { api ->
         if (!ensureDiagOpen(api)) return@withApi
         val s = _ui.value
