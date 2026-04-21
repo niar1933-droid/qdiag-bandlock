@@ -1,0 +1,39 @@
+package com.qdiag.bandlock.root
+
+import android.content.Intent
+import android.os.IBinder
+import android.util.Log
+import com.qdiag.bandlock.diag.DiagNative
+import com.topjohnwu.superuser.ipc.RootService
+
+/**
+ * libsu-backed root service. Runs in a separate UID=0 process and exposes the
+ * [IDiagRoot] AIDL that the main app calls. All /dev/diag traffic happens here.
+ */
+class DiagRootService : RootService() {
+    override fun onBind(intent: Intent): IBinder = Impl()
+
+    private class Impl : IDiagRoot.Stub() {
+        override fun openDiag(): Boolean = DiagNative.openDiag()
+        override fun closeDiag() = DiagNative.closeDiag()
+        override fun isDiagOpen(): Boolean = DiagNative.isDiagOpen()
+
+        override fun sendDiagRaw(request: ByteArray): ByteArray? = try {
+            DiagNative.sendRaw(request)
+        } catch (t: Throwable) {
+            Log.e(TAG, "sendDiagRaw failed", t); null
+        }
+
+        override fun setBandPreference(
+            lteBandMaskLow: Long, lteBandMaskHigh: Long,
+            nrBandMaskLow: Long,  nrBandMaskHigh: Long,
+        ): Int = DiagNative.setBandPref(lteBandMaskLow, lteBandMaskHigh, nrBandMaskLow, nrBandMaskHigh)
+
+        override fun setLteCellLock(earfcn: Int, pci: Int): Int = DiagNative.setLteCellLock(earfcn, pci)
+        override fun clearLteCellLock(): Int = DiagNative.clearLteCellLock()
+        override fun resetBandPreference(): Int = DiagNative.resetBandPref()
+        override fun drainDiagLog(): String = DiagNative.drainLog()
+    }
+
+    companion object { private const val TAG = "DiagRootService" }
+}
