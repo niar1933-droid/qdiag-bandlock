@@ -103,6 +103,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private var snifferSeq: Long = 0
 
+    /**
+     * Decode a return code from the native layer into a short human-readable
+     * string. Matches the QDIAG_RC_* sentinels in jni_bridge.c.
+     */
+    private fun decodeRc(rc: Int): String = when {
+        rc == 0 -> "ok (rc=0)"
+        rc == -1001 -> "DIAG not open"
+        rc == -1002 -> "write failed (EBADF/EACCES?)"
+        rc == -1003 -> "read failed"
+        rc == -1004 -> "timeout (no modem response in 2s — wrong opcode or channel?)"
+        rc == -1005 -> "decoder failed"
+        rc == -1006 -> "request builder failed"
+        rc in -1102..-1002 -> "write failed errno=${-1002 - rc} (${errnoName(-1002 - rc)})"
+        rc in -1103..-1003 -> "read failed errno=${-1003 - rc} (${errnoName(-1003 - rc)})"
+        rc and 0xFFFF0000.toInt() == 0x10000 -> "QMI error 0x${(rc and 0xFFFF).toString(16).padStart(4, '0')}"
+        rc in -2010..-2001 -> "QMI parse error (rc=${rc + 2000})"
+        else -> "rc=0x${rc.toString(16)}"
+    }
+
+    private fun errnoName(e: Int): String = when (e) {
+        1 -> "EPERM"; 2 -> "ENOENT"; 5 -> "EIO"; 9 -> "EBADF"; 11 -> "EAGAIN"
+        12 -> "ENOMEM"; 13 -> "EACCES"; 14 -> "EFAULT"; 16 -> "EBUSY"; 19 -> "ENODEV"
+        22 -> "EINVAL"; 25 -> "ENOTTY"; 32 -> "EPIPE"; 100 -> "ENETDOWN"; 110 -> "ETIMEDOUT"
+        else -> "errno $e"
+    }
+
     init {
         RootClient.checkRoot()
         viewModelScope.launch {
@@ -180,38 +206,50 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun openDiag() = withApi {
-        toast(if (it.openDiag()) "DIAG opened" else "DIAG open FAILED (check /dev/diag permissions + SELinux)")
+        if (it.openDiag()) {
+            toast("DIAG opened")
+        } else {
+            toast("DIAG open FAILED — run: magiskpolicy --live 'allow untrusted_app_* diag_device chr_file rw_file_perms' and chmod 666 /dev/diag")
+        }
     }
     fun closeDiag() = withApi { it.closeDiag(); toast("DIAG closed") }
 
+    /** Ensure DIAG is open; returns false with a descriptive toast otherwise. */
+    private fun ensureDiagOpen(api: IDiagRoot): Boolean {
+        if (api.isDiagOpen) return true
+        if (api.openDiag()) return true
+        toast("Cannot open /dev/diag. SELinux/permissions problem — see README.")
+        return false
+    }
+
     fun applyBandPreference() = withApi { api ->
-        if (!api.isDiagOpen) api.openDiag()
+        if (!ensureDiagOpen(api)) return@withApi
         val s = _ui.value
         val rc = api.setBandPreference(s.lteMask.low, s.lteMask.high, s.nrMask.low, s.nrMask.high)
-        toast("Applied: LTE=${s.lteMask.enabledBands().size} NR=${s.nrMask.enabledBands().size} rc=0x${rc.toString(16)}")
+        toast("Apply bands → ${decodeRc(rc)}")
     }
 
     fun resetBandPreference() = withApi { api ->
-        if (!api.isDiagOpen) api.openDiag()
+        if (!ensureDiagOpen(api)) return@withApi
         val rc = api.resetBandPreference()
         _ui.value = _ui.value.copy(lteMask = BandMask.ALL, nrMask = BandMask.ALL)
-        toast("Reset bands: rc=0x${rc.toString(16)}")
+        toast("Reset bands → ${decodeRc(rc)}")
     }
 
     fun applyCellLock() = withApi { api ->
-        if (!api.isDiagOpen) api.openDiag()
+        if (!ensureDiagOpen(api)) return@withApi
         val s = _ui.value
         val earfcn = s.lockEarfcn.toIntOrNull()
         val pci = s.lockPci.toIntOrNull()
         if (earfcn == null || pci == null) { toast("EARFCN and PCI must be integers"); return@withApi }
         val rc = api.setLteCellLock(earfcn, pci)
-        toast("Lock cell EARFCN=$earfcn PCI=$pci rc=0x${rc.toString(16)}")
+        toast("Lock cell EARFCN=$earfcn PCI=$pci → ${decodeRc(rc)}")
     }
 
     fun clearCellLock() = withApi { api ->
-        if (!api.isDiagOpen) api.openDiag()
+        if (!ensureDiagOpen(api)) return@withApi
         val rc = api.clearLteCellLock()
-        toast("Clear cell lock rc=0x${rc.toString(16)}")
+        toast("Clear cell lock → ${decodeRc(rc)}")
     }
 
     /* --------------------- DIAG sniffer --------------------- */

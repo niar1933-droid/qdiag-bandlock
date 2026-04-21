@@ -89,14 +89,49 @@ sdk.dir=/path/to/Android/Sdk
 ## SELinux / доступ к /dev/diag
 
 Даже под root SELinux обычно не даёт приложению открыть `/dev/diag`. На
-Magisk достаточно:
+Magisk/KernelSU в root-shell (`adb shell su`) запустите:
 
 ```
-su
-magiskpolicy --live "allow untrusted_app diag_device chr_file { read write open ioctl }"
-magiskpolicy --live "allow untrusted_app device dir search"
+# 1. Дать SELinux-разрешения рутовому домену libsu
+magiskpolicy --live 'allow * diag_device chr_file { read write open ioctl getattr }'
+magiskpolicy --live 'allow * device dir { search getattr }'
+magiskpolicy --live 'allow * self capability { sys_admin net_admin }'
+
+# 2. Снять DAC-ограничение
 chmod 666 /dev/diag
+
+# 3. Проверить, что узел существует и читается
+ls -lZ /dev/diag
 ```
+
+На Poco F6 (MIUI/HyperOS на SM8635) ноды `/dev/diag` может не быть —
+модуль `diagchar` либо выгружен, либо не включён в ядро. В этом случае:
+
+```
+# Проверить наличие модуля
+lsmod | grep diag
+# Попробовать подгрузить (нужно ядро с CONFIG_DIAG_CHAR=y или =m)
+insmod /vendor/lib/modules/diagchar.ko   2>/dev/null || \
+insmod /lib/modules/$(uname -r)/kernel/drivers/char/diag/diagchar.ko
+```
+
+Если `/dev/diag` отсутствует даже после `insmod`, модуль вшит в firmware
+модема и доступен только через `qcrild`/`rmnet_core`. В таком случае
+band lock / PCI lock **работать не будут** ни в этом приложении, ни в
+Network Signal Guru — NSG на таких прошивках обычно выдаёт «DIAG port
+not accessible».
+
+## Коды возврата (в Snackbar)
+
+| rc (hex/дec) | Значение |
+|---|---|
+| `ok (rc=0)` | команда ушла в модем |
+| `DIAG not open` | `/dev/diag` не открыт — нажмите Open /dev/diag |
+| `write failed errno=13 (EACCES)` | SELinux/permissions; см. выше |
+| `write failed errno=9 (EBADF)` | handle потерян, переоткройте DIAG |
+| `timeout (no modem response)` | модем не ответил; неверный опкод, неверная QMI-служба или DIAG открыт в неправильном режиме |
+| `QMI error 0xNNNN` | модем ответил, но с ошибкой (см. libqmi `QmiNasQmiError`) |
+| `request builder failed` | баг в приложении — сообщите |
 
 Для постоянного эффекта положите правило в Magisk-модуль в `sepolicy.rule`.
 

@@ -19,19 +19,36 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 /*
+ * Non-QMI return codes surfaced to Kotlin. Kept well clear of 0x0000..0xFFFF
+ * (QMI errors, |= 0x10000) and of -errno values.
+ */
+#define QDIAG_RC_NOT_OPEN       -1001  /* /dev/diag is not open at all */
+#define QDIAG_RC_WRITE_FAIL     -1002  /* write() failed; see errno field */
+#define QDIAG_RC_READ_FAIL      -1003  /* read() failed; see errno field */
+#define QDIAG_RC_TIMEOUT        -1004  /* modem did not answer in time */
+#define QDIAG_RC_BAD_FRAME      -1005  /* response arrived but couldn't be decoded */
+#define QDIAG_RC_BUILD_FAIL     -1006  /* qmi_nas_build_* returned 0 */
+
+/*
  * Helper: HDLC-encode 'req' (length reqLen), write to /dev/diag, then read
  * up to 'timeout_ms' milliseconds for a response. HDLC-decode the first
  * complete frame and return a fresh jbyteArray with the decoded payload,
- * or NULL on timeout/error.
+ * or NULL on error. '*err' gets one of QDIAG_RC_* on failure, or the
+ * errno value (positive) when write/read failed.
  */
 static jbyteArray send_and_recv(JNIEnv *env, const uint8_t *req, size_t reqLen,
-                                int timeout_ms) {
+                                int timeout_ms, int *err, int *err_errno) {
+    *err = 0; *err_errno = 0;
+    if (!diag_is_open()) { *err = QDIAG_RC_NOT_OPEN; return NULL; }
+
     uint8_t encoded[2048];
     size_t  encLen = hdlc_encode(req, reqLen, encoded);
 
     ssize_t w = diag_write_raw(encoded, encLen);
     if (w < 0) {
-        LOGE("diag write failed (%zd)", w);
+        LOGE("diag write failed (%zd), errno=%d (%s)", w, errno, strerror(errno));
+        *err = QDIAG_RC_WRITE_FAIL;
+        *err_errno = (int)(-w); /* diag_write_raw returns -errno */
         return NULL;
     }
 
@@ -40,26 +57,28 @@ static jbyteArray send_and_recv(JNIEnv *env, const uint8_t *req, size_t reqLen,
     int elapsed = 0;
     while (elapsed < timeout_ms && rxHave < sizeof(rx)) {
         ssize_t n = diag_read(rx + rxHave, sizeof(rx) - rxHave);
-        if (n < 0) return NULL;
+        if (n < 0) {
+            LOGE("diag read failed: errno=%d (%s)", errno, strerror(errno));
+            *err = QDIAG_RC_READ_FAIL;
+            *err_errno = (int)(-n);
+            return NULL;
+        }
         if (n == 0) { elapsed += 200; continue; }
         rxHave += (size_t)n;
-        /* Scan for terminating 0x7E within the just-received chunk. */
         for (size_t i = rxHave - (size_t)n; i < rxHave; i++) {
             if (rx[i] == 0x7E) {
                 uint8_t decoded[2048];
                 size_t dec = hdlc_decode(rx, i + 1, decoded, sizeof(decoded));
-                if (dec == 0) {
-                    /* bad frame, keep reading */
-                    continue;
-                }
+                if (dec == 0) continue;
                 jbyteArray out = (*env)->NewByteArray(env, (jsize)dec);
-                if (!out) return NULL;
+                if (!out) { *err = QDIAG_RC_BAD_FRAME; return NULL; }
                 (*env)->SetByteArrayRegion(env, out, 0, (jsize)dec, (const jbyte *)decoded);
                 return out;
             }
         }
     }
     LOGE("send_and_recv: timeout after %d ms", timeout_ms);
+    *err = QDIAG_RC_TIMEOUT;
     return NULL;
 }
 
@@ -87,23 +106,31 @@ Java_com_qdiag_bandlock_diag_DiagNative_sendRaw(JNIEnv *env, jclass clz, jbyteAr
     jsize len = (*env)->GetArrayLength(env, req);
     jbyte *buf = (*env)->GetByteArrayElements(env, req, NULL);
     if (!buf) return NULL;
-    jbyteArray out = send_and_recv(env, (const uint8_t *)buf, (size_t)len, 2000);
+    int e1 = 0, e2 = 0;
+    jbyteArray out = send_and_recv(env, (const uint8_t *)buf, (size_t)len, 2000, &e1, &e2);
     (*env)->ReleaseByteArrayElements(env, req, buf, JNI_ABORT);
     return out;
 }
 
 static jint run_qmi(JNIEnv *env, const uint8_t *req, size_t reqLen) {
-    jbyteArray ja = send_and_recv(env, req, reqLen, 2000);
-    if (!ja) return -100;
+    int e1 = 0, e2 = 0;
+    jbyteArray ja = send_and_recv(env, req, reqLen, 2000, &e1, &e2);
+    if (!ja) {
+        if (e1 == QDIAG_RC_WRITE_FAIL || e1 == QDIAG_RC_READ_FAIL) {
+            /* Fold errno into low byte so Kotlin can decode it. */
+            return (jint)(e1 - e2);
+        }
+        return (jint)e1;
+    }
     jsize jl = (*env)->GetArrayLength(env, ja);
     jbyte *p = (*env)->GetByteArrayElements(env, ja, NULL);
     uint16_t err = 0;
     int rc = qmi_parse_response((const uint8_t *)p, (size_t)jl, &err);
     (*env)->ReleaseByteArrayElements(env, ja, p, JNI_ABORT);
-    if (rc < 0) return -200 + rc;
+    if (rc < 0) return (jint)(-2000 + rc); /* parse error */
     if (rc != 0) {
         LOGE("QMI result=%d error=0x%04x", rc, err);
-        return (jint)(0x10000 | err); /* surface the QMI error code */
+        return (jint)(0x10000 | err);
     }
     return 0;
 }
@@ -117,7 +144,7 @@ Java_com_qdiag_bandlock_diag_DiagNative_setBandPref(JNIEnv *env, jclass clz,
     size_t  len = qmi_nas_build_set_band_pref(req,
         (uint64_t)lteLow, (uint64_t)lteHigh,
         (uint64_t)nrLow,  (uint64_t)nrHigh);
-    if (!len) return -1;
+    if (!len) return QDIAG_RC_BUILD_FAIL;
     return run_qmi(env, req, len);
 }
 
@@ -126,7 +153,7 @@ Java_com_qdiag_bandlock_diag_DiagNative_resetBandPref(JNIEnv *env, jclass clz) {
     (void)clz;
     uint8_t req[QMI_MAX_REQUEST];
     size_t  len = qmi_nas_build_reset_band_pref(req);
-    if (!len) return -1;
+    if (!len) return QDIAG_RC_BUILD_FAIL;
     return run_qmi(env, req, len);
 }
 
@@ -136,7 +163,7 @@ Java_com_qdiag_bandlock_diag_DiagNative_setLteCellLock(JNIEnv *env, jclass clz,
     (void)clz;
     uint8_t req[QMI_MAX_REQUEST];
     size_t  len = qmi_nas_build_lte_cell_lock(req, (uint32_t)earfcn, (uint32_t)pci);
-    if (!len) return -1;
+    if (!len) return QDIAG_RC_BUILD_FAIL;
     return run_qmi(env, req, len);
 }
 
@@ -145,7 +172,7 @@ Java_com_qdiag_bandlock_diag_DiagNative_clearLteCellLock(JNIEnv *env, jclass clz
     (void)clz;
     uint8_t req[QMI_MAX_REQUEST];
     size_t  len = qmi_nas_build_lte_cell_unlock(req);
-    if (!len) return -1;
+    if (!len) return QDIAG_RC_BUILD_FAIL;
     return run_qmi(env, req, len);
 }
 
