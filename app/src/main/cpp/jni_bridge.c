@@ -9,6 +9,7 @@
 #include "efs2.h"
 #include "hdlc.h"
 #include "qmi_nas.h"
+#include "qmux.h"
 #include "qrtr.h"
 #include "sniffer.h"
 
@@ -503,6 +504,129 @@ Java_com_qdiag_bandlock_diag_DiagNative_qrtrSetBandPref(
 
     uint16_t mid = 0, result = 0xFFFF, err = 0xFFFF;
     int prc = qrtr_parse_qmi_response(rx, (size_t)n, &mid, &result, &err);
+    if (prc < 0) return QDIAG_RC_BAD_FRAME;
+    if (result != 0) return (jint)(0x10000 | err);
+    return 0;
+}
+
+/* ========================================================================== */
+/* QMUX transport — AF_UNIX /dev/socket/qmux_radio/ril_ipc                    */
+/* Works on devices without /dev/diag AND with kernel-ns hiding modem QMI    */
+/* services from untrusted sockets. qmuxd is the trusted path that qcrild   */
+/* itself uses.                                                             */
+/* ========================================================================== */
+
+JNIEXPORT jint JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_qmuxOpen(JNIEnv *env, jclass clz, jstring path) {
+    (void)clz;
+    const char *cpath = NULL;
+    if (path) cpath = (*env)->GetStringUTFChars(env, path, NULL);
+    int rc = qmux_open(cpath);
+    if (path && cpath) (*env)->ReleaseStringUTFChars(env, path, cpath);
+    if (rc != QMUX_RC_OK) {
+        LOGE("qmux_open rc=%d errno=%d (%s)", rc, qmux_last_errno(),
+             strerror(qmux_last_errno()));
+        int e = qmux_last_errno();
+        if (e > 0) return -(3000 + e);
+        return rc;
+    }
+    return 0;
+}
+
+JNIEXPORT void JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_qmuxClose(JNIEnv *env, jclass clz) {
+    (void)env; (void)clz;
+    qmux_close();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_qmuxIsOpen(JNIEnv *env, jclass clz) {
+    (void)env; (void)clz;
+    return qmux_is_open() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_qmuxSockPath(JNIEnv *env, jclass clz) {
+    (void)clz;
+    return (*env)->NewStringUTF(env, qmux_last_sockpath());
+}
+
+/*
+ * Allocate a QMI client ID on a given service. Returns the assigned client id
+ * (0..255) on success, or a negative error code.
+ */
+JNIEXPORT jint JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_qmuxAllocClient(JNIEnv *env, jclass clz,
+                                                       jint service) {
+    (void)env; (void)clz;
+    uint8_t cid = 0;
+    int rc = qmux_alloc_client((uint8_t)service, &cid, 3000);
+    if (rc < 0) return rc;
+    return (jint)cid;
+}
+
+/*
+ * Apply LTE+NR band preference via QMI_NAS over qmuxd.
+ * Returns 0 on success, (0x10000 | qmi_err) on modem rejection, or negative
+ * QMUX_RC_*.
+ */
+JNIEXPORT jint JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_qmuxSetBandPref(
+        JNIEnv *env, jclass clz,
+        jlong lteLow, jlong lteHigh, jlong nrLow, jlong nrHigh) {
+    (void)env; (void)clz;
+    if (!qmux_is_open()) return QMUX_RC_NOT_OPEN;
+
+    uint8_t cid = 0;
+    int rc = qmux_alloc_client(QMUX_SVC_NAS, &cid, 3000);
+    if (rc < 0) { LOGE("qmux alloc NAS client rc=%d", rc); return rc; }
+
+    /* Build TLVs — identical layout to DIAG/QRTR paths; the QMI SDU is
+     * transport-agnostic. */
+    uint8_t tlvs[128];
+    size_t  to = 0;
+
+    /* TLV 0x11 legacy band pref (8 bytes, bands 1..64) */
+    tlvs[to++] = 0x11;
+    tlvs[to++] = 0x08; tlvs[to++] = 0x00;
+    for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((lteLow >> (8*i)) & 0xFF);
+
+    /* TLV 0x12 mode pref (u16 LE = 0x00FF) */
+    tlvs[to++] = 0x12;
+    tlvs[to++] = 0x02; tlvs[to++] = 0x00;
+    tlvs[to++] = 0xFF; tlvs[to++] = 0x00;
+
+    /* TLV 0x1C LTE band pref ext (16 bytes, bands 1..128) */
+    tlvs[to++] = 0x1C;
+    tlvs[to++] = 0x10; tlvs[to++] = 0x00;
+    for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((lteLow  >> (8*i)) & 0xFF);
+    for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((lteHigh >> (8*i)) & 0xFF);
+
+    /* TLV 0x24 NR5G SA band pref (16 bytes) */
+    tlvs[to++] = 0x24;
+    tlvs[to++] = 0x10; tlvs[to++] = 0x00;
+    for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((nrLow  >> (8*i)) & 0xFF);
+    for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((nrHigh >> (8*i)) & 0xFF);
+
+    /* TLV 0x25 NR5G NSA band pref (16 bytes) */
+    tlvs[to++] = 0x25;
+    tlvs[to++] = 0x10; tlvs[to++] = 0x00;
+    for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((nrLow  >> (8*i)) & 0xFF);
+    for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((nrHigh >> (8*i)) & 0xFF);
+
+    uint8_t sdu[256];
+    size_t  sdu_len = qmux_build_qmi_sdu(sdu, sizeof(sdu),
+                                         0x0033, /* SET_SYSTEM_SELECTION_PREFERENCE */
+                                         tlvs, to);
+    if (!sdu_len) { qmux_release_client(QMUX_SVC_NAS, cid); return QDIAG_RC_BUILD_FAIL; }
+
+    uint8_t rx[2048];
+    int n = qmux_transact(QMUX_SVC_NAS, cid, sdu, sdu_len, rx, sizeof(rx), 5000);
+    qmux_release_client(QMUX_SVC_NAS, cid);
+    if (n < 0) return n;
+
+    uint16_t mid = 0, result = 0xFFFF, err = 0xFFFF;
+    int prc = qmux_parse_qmi_response(rx, (size_t)n, &mid, &result, &err);
     if (prc < 0) return QDIAG_RC_BAD_FRAME;
     if (result != 0) return (jint)(0x10000 | err);
     return 0;

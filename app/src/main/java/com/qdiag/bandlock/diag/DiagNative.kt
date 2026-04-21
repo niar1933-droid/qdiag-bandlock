@@ -78,6 +78,25 @@ object DiagNative {
         lteLow: Long, lteHigh: Long, nrLow: Long, nrHigh: Long,
     ): Int
 
+    /* ---------- QMUX transport (AF_UNIX /dev/socket/qmux_radio/ril_ipc) ---------- */
+
+    /** Open AF_UNIX socket to qmuxd. `path` may be null for auto-discovery
+     *  (tries /dev/socket/qmux_radio/ril_ipc → /dev/socket/qmux_radio → /dev/socket/qmuxd).
+     *  Returns 0 on success; `-(3000+errno)` encodes the underlying errno. */
+    @JvmStatic external fun qmuxOpen(path: String?): Int
+    @JvmStatic external fun qmuxClose()
+    @JvmStatic external fun qmuxIsOpen(): Boolean
+    @JvmStatic external fun qmuxSockPath(): String
+
+    /** Allocate a QMI client ID on the given service (e.g. 0x03 = NAS). */
+    @JvmStatic external fun qmuxAllocClient(service: Int): Int
+
+    /** Apply LTE+NR band preference via QMI NAS over qmuxd (bypasses /dev/diag
+     *  and bypasses kernel-ns filtering on HyperOS). */
+    @JvmStatic external fun qmuxSetBandPref(
+        lteLow: Long, lteHigh: Long, nrLow: Long, nrHigh: Long,
+    ): Int
+
     /* ---------- DIAG sniffer (background HDLC-decoded frame capture) ---------- */
 
     @JvmStatic external fun snifferStart(): Boolean

@@ -343,6 +343,35 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         toast("Enumerated QMI services (см. Command log)")
     }
 
+    /**
+     * Apply band preference via QMUX (AF_UNIX `/dev/socket/qmux_radio/ril_ipc`).
+     * This path bypasses BOTH `/dev/diag` (absent on HyperOS) AND the QRTR ns
+     * daemon (which hides modem QMI services from untrusted UIDs). qmuxd is
+     * the standard Qualcomm QMI multiplexer that qcrild itself speaks to.
+     */
+    fun applyBandPreferenceQmux() = withApi { api ->
+        if (!api.qmuxIsOpen()) {
+            val rc = api.qmuxOpen(null)
+            if (rc != 0) {
+                val hint = when (rc) {
+                    -(3000 + 2)   -> "ENOENT (сокет не найден — qmuxd не запущен?)"
+                    -(3000 + 13)  -> "EACCES (SELinux режет; нужен magiskpolicy)"
+                    -(3000 + 111) -> "ECONNREFUSED (qmuxd не слушает; пробуем другой путь)"
+                    else          -> "rc=$rc"
+                }
+                toast("QMUX open FAILED: $hint")
+                appendLog("qmux_open rc=$rc")
+                return@withApi
+            }
+            appendLog("qmux opened at ${api.qmuxSockPath()}")
+        }
+        val s = _ui.value
+        val rc = api.qmuxSetBandPref(s.lteMask.low, s.lteMask.high, s.nrMask.low, s.nrMask.high)
+        appendLog("qmux_set_band_pref rc=$rc (LTE=${s.lteMask.enabledBands()} NR=${s.nrMask.enabledBands()})")
+        toast("QMUX band pref: LTE=${s.lteMask.enabledBands().size} " +
+              "NR=${s.nrMask.enabledBands().size} → ${decodeRc(rc)}")
+    }
+
     fun applyBandPreferenceEfs() = withApi { api ->
         if (!ensureDiagOpen(api)) return@withApi
         val s = _ui.value

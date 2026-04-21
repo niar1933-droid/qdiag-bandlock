@@ -54,6 +54,14 @@ class DiagRootService : RootService() {
         override fun qrtrEnumerate(): String = DiagNative.qrtrEnumerate()
         override fun qrtrSetBandPref(lteLow: Long, lteHigh: Long, nrLow: Long, nrHigh: Long): Int =
             DiagNative.qrtrSetBandPref(lteLow, lteHigh, nrLow, nrHigh)
+
+        override fun qmuxOpen(path: String?): Int = DiagNative.qmuxOpen(path)
+        override fun qmuxClose() = DiagNative.qmuxClose()
+        override fun qmuxIsOpen(): Boolean = DiagNative.qmuxIsOpen()
+        override fun qmuxSockPath(): String = DiagNative.qmuxSockPath()
+        override fun qmuxAllocClient(service: Int): Int = DiagNative.qmuxAllocClient(service)
+        override fun qmuxSetBandPref(lteLow: Long, lteHigh: Long, nrLow: Long, nrHigh: Long): Int =
+            DiagNative.qmuxSetBandPref(lteLow, lteHigh, nrLow, nrHigh)
     }
 
     companion object { private const val TAG = "DiagRootService" }

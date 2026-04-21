@@ -97,4 +97,23 @@ interface IDiagRoot {
 
     /** Apply LTE+NR band preference via QMI NAS over QRTR (no /dev/diag). */
     int qrtrSetBandPref(long lteLow, long lteHigh, long nrLow, long nrHigh);
+
+    /* ---------- QMUX transport (AF_UNIX /dev/socket/qmux_radio/ril_ipc) ---------- */
+
+    /** Open qmuxd socket. path may be null for auto-discovery.
+     *  Returns 0 on success; -(3000+errno) on failure. */
+    int qmuxOpen(String path);
+    void qmuxClose();
+    boolean qmuxIsOpen();
+
+    /** Socket path actually connected to (for diagnostic display). */
+    String qmuxSockPath();
+
+    /** Allocate a QMI client ID on the given service (e.g. 0x03 = NAS).
+     *  Returns cid (0..255) on success, negative on error. */
+    int qmuxAllocClient(int service);
+
+    /** Apply LTE+NR band preference via QMI NAS over qmuxd.
+     *  Bypasses /dev/diag AND kernel-ns filtering on HyperOS. */
+    int qmuxSetBandPref(long lteLow, long lteHigh, long nrLow, long nrHigh);
 }

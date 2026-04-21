@@ -245,20 +245,22 @@ private fun BandLockPanel(state: UiState, vm: MainViewModel) {
         Spacer(Modifier.height(4.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
-                onClick = vm::applyBandPreferenceQrtr,
+                onClick = vm::applyBandPreferenceQmux,
                 enabled = !state.busy,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = NsgColors.Accent,
                     contentColor = Color.White,
                 ),
-            ) { Text("Apply (QRTR)", fontWeight = FontWeight.Bold) }
+            ) { Text("Apply (QMUX)", fontWeight = FontWeight.Bold) }
+            OutlinedButton(onClick = vm::applyBandPreferenceQrtr, enabled = !state.busy) { Text("QRTR") }
             OutlinedButton(onClick = vm::applyBandPreferenceEfs, enabled = !state.busy) { Text("EFS") }
             OutlinedButton(onClick = vm::applyBandPreference, enabled = !state.busy) { Text("DIAG") }
             OutlinedButton(onClick = vm::resetBandPreference, enabled = !state.busy) { Text("Reset") }
         }
         Text(
-            "Apply (QRTR) — AF_QIPCRTR socket, работает БЕЗ /dev/diag (правильный путь " +
-                "для HyperOS/MIUI без diagchar). EFS — NV-items через DIAG EFS2. DIAG — QMI-over-DIAG.",
+            "Apply (QMUX) — AF_UNIX /dev/socket/qmux_radio/ril_ipc. Штатный путь qcrild. " +
+                "Работает БЕЗ /dev/diag и в обход qrtr-ns фильтрации модемных QMI на HyperOS. " +
+                "QRTR — прямой AF_QIPCRTR (если ns не фильтрует). EFS — NV-items. DIAG — QMI-over-DIAG.",
             color = NsgColors.TextLabel,
             fontSize = 10.sp,
             modifier = Modifier.padding(vertical = 4.dp),

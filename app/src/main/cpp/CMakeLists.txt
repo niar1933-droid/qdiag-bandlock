@@ -12,6 +12,7 @@ add_library(qdiag_native SHARED
         efs2.c
         sniffer.c
         qrtr.c
+        qmux.c
 )
 
 target_include_directories(qdiag_native PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
