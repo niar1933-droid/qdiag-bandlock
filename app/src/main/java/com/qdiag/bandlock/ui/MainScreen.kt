@@ -123,7 +123,9 @@ fun MainScreen(vm: MainViewModel) {
                     },
                     actions = {
                         Text(
-                            text = "root:${rootShort(state.rootStatus)}  diag:${if (state.diagOpen) "open" else "-"}",
+                            text = "root:${rootShort(state.rootStatus)}  " +
+                                "svc:${if (state.apiBound) "ok" else "-"}  " +
+                                "diag:${if (state.diagOpen) "open" else "-"}",
                             color = NsgColors.TextLabel,
                             fontSize = 12.sp,
                             modifier = Modifier.padding(end = 12.dp),
@@ -156,7 +158,7 @@ fun MainScreen(vm: MainViewModel) {
                             DrawerPanel.BandLock -> BandLockPanel(state, vm)
                             DrawerPanel.CellLock -> CellLockPanel(state, vm)
                             DrawerPanel.Sniffer  -> SnifferPanel(state, vm)
-                            DrawerPanel.Log      -> LogPanel(state)
+                            DrawerPanel.Log      -> LogPanel(state, vm)
                             DrawerPanel.None     -> {}
                         }
                     }
@@ -397,7 +399,7 @@ private fun SnifferPanel(state: UiState, vm: MainViewModel) {
 /* ----------------------- Log panel ----------------------- */
 
 @Composable
-private fun LogPanel(state: UiState) {
+private fun LogPanel(state: UiState, vm: MainViewModel) {
     Column(Modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -407,6 +409,12 @@ private fun LogPanel(state: UiState) {
                 fontSize = 14.sp,
                 modifier = Modifier.weight(1f),
             )
+            val bound = state.apiBound
+            FilledTonalButton(onClick = vm::bindRootService) {
+                Text(if (bound) "Reconnect root" else "Connect root")
+            }
+            Spacer(Modifier.width(6.dp))
+            OutlinedButton(onClick = vm::openDiag) { Text("Open /dev/diag") }
         }
         Spacer(Modifier.height(4.dp))
         Box(

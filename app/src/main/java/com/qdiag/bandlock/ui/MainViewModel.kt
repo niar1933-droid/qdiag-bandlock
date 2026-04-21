@@ -62,6 +62,7 @@ private const val MAX_SNIFFER_UI_FRAMES = 500
 
 data class UiState(
     val rootStatus: RootClient.Status = RootClient.Status.Unknown,
+    val apiBound: Boolean = false,
     val diagOpen: Boolean = false,
     val lteMask: BandMask = BandMask.ALL,
     val nrMask: BandMask = BandMask.ALL,
@@ -89,7 +90,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     init {
         RootClient.checkRoot()
         viewModelScope.launch {
-            RootClient.status.collect { s -> _ui.value = _ui.value.copy(rootStatus = s) }
+            RootClient.status.collect { s ->
+                _ui.value = _ui.value.copy(rootStatus = s)
+                if (s is RootClient.Status.HasRoot && RootClient.api.value == null) {
+                    appendLog("Root granted, binding root service…")
+                    RootClient.bind(getApplication())
+                }
+            }
+        }
+        viewModelScope.launch {
+            RootClient.api.collect { api ->
+                _ui.value = _ui.value.copy(apiBound = api != null)
+                if (api != null) appendLog("Root service connected.")
+            }
         }
         viewModelScope.launch {
             observer.snapshots.collect { c -> _ui.value = _ui.value.copy(snapshots = c) }
@@ -102,7 +115,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun bindRootService() = RootClient.bind(getApplication())
+    fun bindRootService() {
+        appendLog("Binding root service…")
+        RootClient.checkRoot()
+        RootClient.bind(getApplication())
+    }
     fun refreshCells() = observer.refresh()
 
     fun toggleLte(band: Int, enabled: Boolean) {
@@ -125,7 +142,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun withApi(block: suspend (IDiagRoot) -> Unit) {
         val api = RootClient.api.value
         if (api == null) {
-            appendLog("Root service not bound. Tap 'Connect root service' first.")
+            appendLog("Root service not bound yet. Binding now — retry the action in a second.")
+            RootClient.bind(getApplication())
             return
         }
         viewModelScope.launch {
