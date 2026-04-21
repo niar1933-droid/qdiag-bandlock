@@ -155,6 +155,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 if (_ui.value.snifferRunning) pollSniffer()
             }
         }
+        /* Periodically refresh cell / RSSI snapshot so the UI doesn't freeze. */
+        viewModelScope.launch {
+            while (isActive) {
+                observer.refresh()
+                delay(2000)
+            }
+        }
     }
 
     fun bindRootService() {
