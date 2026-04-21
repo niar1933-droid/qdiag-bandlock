@@ -233,6 +233,74 @@ Java_com_qdiag_bandlock_diag_DiagNative_efsPutItemFile(JNIEnv *env, jclass clz,
     return 0;
 }
 
+/**
+ * EFS2 Get Item File — read NV item content.
+ * Returns null on error, otherwise a byte[] with the item contents.
+ */
+JNIEXPORT jbyteArray JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_efsGetItemFile(JNIEnv *env, jclass clz,
+                                                       jstring jpath) {
+    (void)clz;
+    if (!diag_is_open() || !jpath) return NULL;
+    const char *path = (*env)->GetStringUTFChars(env, jpath, NULL);
+    if (!path) return NULL;
+
+    uint8_t req[512];
+    size_t  reqLen = efs2_build_get_item_file(req, sizeof(req), path);
+    (*env)->ReleaseStringUTFChars(env, jpath, path);
+    if (!reqLen) return NULL;
+
+    int e1 = 0, e2 = 0;
+    jbyteArray ja = send_and_recv(env, req, reqLen, 2000, &e1, &e2);
+    if (!ja) return NULL;
+    jsize jl = (*env)->GetArrayLength(env, ja);
+    jbyte *p = (*env)->GetByteArrayElements(env, ja, NULL);
+
+    uint8_t data[4096];
+    int n = efs2_parse_get_item_response((const uint8_t *)p, (size_t)jl, data, sizeof(data));
+    (*env)->ReleaseByteArrayElements(env, ja, p, JNI_ABORT);
+    if (n < 0) return NULL;
+    jbyteArray out = (*env)->NewByteArray(env, (jsize)n);
+    if (!out) return NULL;
+    if (n) (*env)->SetByteArrayRegion(env, out, 0, (jsize)n, (const jbyte *)data);
+    return out;
+}
+
+/**
+ * EFS2 Unlink — delete an NV item. Used to clear a lock.
+ * Returns 0 on success, negative on transport failure, or
+ * (0x20000 | diag_errno) if the modem rejected.
+ */
+JNIEXPORT jint JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_efsUnlink(JNIEnv *env, jclass clz,
+                                                  jstring jpath) {
+    (void)clz;
+    if (!diag_is_open()) return QDIAG_RC_NOT_OPEN;
+    if (!jpath) return QDIAG_RC_BUILD_FAIL;
+    const char *path = (*env)->GetStringUTFChars(env, jpath, NULL);
+    if (!path) return QDIAG_RC_BUILD_FAIL;
+
+    uint8_t req[512];
+    size_t  reqLen = efs2_build_unlink(req, sizeof(req), path);
+    (*env)->ReleaseStringUTFChars(env, jpath, path);
+    if (!reqLen) return QDIAG_RC_BUILD_FAIL;
+
+    int e1 = 0, e2 = 0;
+    jbyteArray ja = send_and_recv(env, req, reqLen, 2000, &e1, &e2);
+    if (!ja) {
+        if (e1 == QDIAG_RC_WRITE_FAIL || e1 == QDIAG_RC_READ_FAIL) return (jint)(e1 - e2);
+        return (jint)e1;
+    }
+    jsize jl = (*env)->GetArrayLength(env, ja);
+    jbyte *p = (*env)->GetByteArrayElements(env, ja, NULL);
+    uint16_t op = 0; int32_t derr = 0;
+    int prc = efs2_parse_response((const uint8_t *)p, (size_t)jl, &op, &derr);
+    (*env)->ReleaseByteArrayElements(env, ja, p, JNI_ABORT);
+    if (prc < 0)    return QDIAG_RC_BAD_FRAME;
+    if (derr != 0)  return (jint)(0x20000 | (derr & 0xFFFF));
+    return 0;
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_qdiag_bandlock_diag_DiagNative_drainLog(JNIEnv *env, jclass clz) {
     (void)clz;

@@ -42,6 +42,23 @@ object DiagNative {
      */
     @JvmStatic external fun efsPutItemFile(path: String, value: ByteArray): Int
 
+    /**
+     * Raw EFS2 Get Item File. Reads the current bytes stored at `path`.
+     * Returns null on transport failure or non-zero diag_errno, otherwise
+     * the raw NV-item bytes. Useful for inspecting current lock state
+     * before overwriting.
+     */
+    @JvmStatic external fun efsGetItemFile(path: String): ByteArray?
+
+    /**
+     * Raw EFS2 Unlink — delete the NV item at `path`. Equivalent to
+     * clearing a lock (modem falls back to default behaviour).
+     *
+     * @return 0 on success; negative on transport failure;
+     *         (0x20000 | diag_errno) if the modem rejected.
+     */
+    @JvmStatic external fun efsUnlink(path: String): Int
+
     @JvmStatic external fun drainLog(): String
 
     /* ---------- DIAG sniffer (background HDLC-decoded frame capture) ---------- */

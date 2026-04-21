@@ -35,6 +35,9 @@ class DiagRootService : RootService() {
         override fun resetBandPreference(): Int = DiagNative.resetBandPref()
         override fun efsPutItemFile(path: String, value: ByteArray): Int =
             DiagNative.efsPutItemFile(path, value)
+        override fun efsGetItemFile(path: String): ByteArray? =
+            DiagNative.efsGetItemFile(path)
+        override fun efsUnlink(path: String): Int = DiagNative.efsUnlink(path)
         override fun drainDiagLog(): String = DiagNative.drainLog()
 
         override fun startSniffer(): Boolean = DiagNative.snifferStart()

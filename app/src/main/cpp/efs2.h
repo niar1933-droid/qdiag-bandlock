@@ -37,6 +37,9 @@
 #define EFS2_OP_CLOSE           0x0003
 #define EFS2_OP_READ            0x0004
 #define EFS2_OP_WRITE           0x0005
+#define EFS2_OP_MKDIR           0x000E
+#define EFS2_OP_RMDIR           0x000F
+#define EFS2_OP_UNLINK          0x0010
 #define EFS2_OP_PUT_ITEM_FILE   0x0011
 #define EFS2_OP_GET_ITEM_FILE   0x0012
 
@@ -54,6 +57,17 @@ size_t efs2_build_put_item_file(uint8_t *out, size_t out_cap,
                                 const char *path,
                                 const uint8_t *value, size_t value_len);
 
+/* Build an EFS2 Get Item File request (read an NV item).
+ * Response will contain the item's bytes after the standard header.
+ * Returns frame length on success, 0 on error. */
+size_t efs2_build_get_item_file(uint8_t *out, size_t out_cap,
+                                const char *path);
+
+/* Build an EFS2 Unlink (delete) request. Used to clear a lock by
+ * removing the NV item entirely. Returns frame length. */
+size_t efs2_build_unlink(uint8_t *out, size_t out_cap,
+                         const char *path);
+
 /* Build an EFS2 Hello request (handshake, often required before first
  * data op). Returns frame length. */
 size_t efs2_build_hello(uint8_t *out, size_t out_cap);
@@ -63,6 +77,12 @@ size_t efs2_build_hello(uint8_t *out, size_t out_cap);
  * -1 on malformed frame. diag_errno == 0 means the modem accepted the op. */
 int efs2_parse_response(const uint8_t *frame, size_t len,
                         uint16_t *out_op, int32_t *out_errno);
+
+/* Parse an EFS2 Get Item File response. Copies the item data into
+ * out_data (up to out_cap bytes). Returns the number of data bytes
+ * on success, or -1 on error / non-zero diag_errno. */
+int efs2_parse_get_item_response(const uint8_t *frame, size_t len,
+                                 uint8_t *out_data, size_t out_cap);
 
 /* --- High-level NV-item paths observed in NSG 4.7.14 --- */
 #define EFS_NV_NR5G_PCI_LOCK        "/nv/item_files/modem/nr5g/RRC/pci_lock_info"

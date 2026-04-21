@@ -51,6 +51,13 @@ interface IDiagRoot {
      */
     int efsPutItemFile(String path, in byte[] value);
 
+    /** EFS2 Get Item File — read current NV item bytes. Null on error. */
+    @nullable byte[] efsGetItemFile(String path);
+
+    /** EFS2 Unlink — delete the NV item (equivalent to clearing a lock).
+     * 0 on success, negative on transport failure, (0x20000|err) on modem reject. */
+    int efsUnlink(String path);
+
     /** Drain pending DIAG log messages accumulated since last drain. Returns concatenated hex lines. */
     String drainDiagLog();
 

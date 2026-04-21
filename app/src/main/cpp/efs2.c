@@ -65,6 +65,63 @@ size_t efs2_build_hello(uint8_t *out, size_t out_cap) {
     return o;
 }
 
+size_t efs2_build_get_item_file(uint8_t *out, size_t out_cap,
+                                const char *path) {
+    if (!out || !path) return 0;
+    size_t path_len = strlen(path);
+    /* DIAG header (4) + seq (2) + path + NUL */
+    size_t total = 4 + 2 + path_len + 1;
+    if (total > out_cap) return 0;
+
+    size_t o = 0;
+    o = put_u8 (out, o, DIAG_SUBSYS_CMD);
+    o = put_u8 (out, o, DIAG_SUBSYS_FS);
+    o = put_u16(out, o, EFS2_OP_GET_ITEM_FILE);
+    o = put_u16(out, o, g_efs2_seq++);
+    memcpy(out + o, path, path_len);
+    o += path_len;
+    out[o++] = 0x00;
+    return o;
+}
+
+size_t efs2_build_unlink(uint8_t *out, size_t out_cap,
+                         const char *path) {
+    if (!out || !path) return 0;
+    size_t path_len = strlen(path);
+    size_t total = 4 + 2 + path_len + 1;
+    if (total > out_cap) return 0;
+
+    size_t o = 0;
+    o = put_u8 (out, o, DIAG_SUBSYS_CMD);
+    o = put_u8 (out, o, DIAG_SUBSYS_FS);
+    o = put_u16(out, o, EFS2_OP_UNLINK);
+    o = put_u16(out, o, g_efs2_seq++);
+    memcpy(out + o, path, path_len);
+    o += path_len;
+    out[o++] = 0x00;
+    return o;
+}
+
+int efs2_parse_get_item_response(const uint8_t *frame, size_t len,
+                                 uint8_t *out_data, size_t out_cap) {
+    if (!frame || len < 10) return -1;
+    if (frame[0] != DIAG_SUBSYS_CMD) return -1;
+    if (frame[1] != DIAG_SUBSYS_FS)  return -1;
+    uint16_t op = (uint16_t)(frame[2] | (frame[3] << 8));
+    if (op != EFS2_OP_GET_ITEM_FILE) return -1;
+    /* [4..6] = seq, [6..10] = diag_errno */
+    int32_t er = (int32_t)((uint32_t)frame[6]       |
+                           ((uint32_t)frame[7]  << 8)  |
+                           ((uint32_t)frame[8]  << 16) |
+                           ((uint32_t)frame[9]  << 24));
+    if (er != 0) return -1;
+    /* Data starts at offset 10 */
+    size_t data_len = len - 10;
+    if (data_len > out_cap) data_len = out_cap;
+    if (data_len && out_data) memcpy(out_data, frame + 10, data_len);
+    return (int)data_len;
+}
+
 int efs2_parse_response(const uint8_t *frame, size_t len,
                         uint16_t *out_op, int32_t *out_errno) {
     if (!frame || len < 12) return -1;
