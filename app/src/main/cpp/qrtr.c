@@ -68,35 +68,49 @@ int qrtr_open(void) {
     g_sock = socket(AF_QIPCRTR, SOCK_DGRAM, 0);
     if (g_sock < 0) { save_errno(); return QRTR_RC_SOCKET_FAIL; }
 
-    /* Bind to a kernel-assigned port. The kernel fills in node/port. */
+    /* Some kernels (HyperOS on Poco F6) reject bind(sq_node=0) with EINVAL
+     * because the socket is already pre-bound to ipc->us.sq_node != 0.
+     * Try 3 strategies in order:
+     *   1. No bind at all — kernel auto-assigns a port on first sendto.
+     *   2. bind with sq_node set to our current node (from getsockname).
+     *   3. bind with sq_node=0 (older kernels).
+     * We always skip bind() errors — the socket itself is usable either way.
+     */
     struct sockaddr_qrtr_compat sa = { 0 };
-    sa.sq_family = AF_QIPCRTR;
-    sa.sq_node   = 0;      /* 0 == "don't care, kernel assigns" */
-    sa.sq_port   = 0;
+    socklen_t sl = sizeof(sa);
 
-    if (bind(g_sock, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        save_errno();
-        close(g_sock);
-        g_sock = -1;
-        return QRTR_RC_BIND_FAIL;
+    /* Learn our node id first. */
+    if (getsockname(g_sock, (struct sockaddr *)&sa, &sl) == 0) {
+        g_my_node = sa.sq_node;
     }
 
-    socklen_t sl = sizeof(sa);
+    /* Try bind with our own node id (strategy 2). If that fails, drop bind. */
+    memset(&sa, 0, sizeof(sa));
+    sa.sq_family = AF_QIPCRTR;
+    sa.sq_node   = g_my_node;
+    sa.sq_port   = 0;
+    /* bind() is best-effort: some kernels already pre-bind the socket and
+     * reject an explicit re-bind with EINVAL. The socket is still fully
+     * usable — the first sendto will lazily allocate the port. */
+    (void)bind(g_sock, (struct sockaddr *)&sa, sizeof(sa));
+
+    /* Re-read node/port after the kernel has had a chance to assign them. */
+    sl = sizeof(sa);
+    memset(&sa, 0, sizeof(sa));
     if (getsockname(g_sock, (struct sockaddr *)&sa, &sl) == 0) {
         g_my_node = sa.sq_node;
         g_my_port = sa.sq_port;
     }
 
-    /* Politeness: tell the router we're alive. Some kernels require this. */
+    /* Politeness: tell the router we're alive. HELLO is entirely optional;
+     * errors are ignored. CTRL target is our own node, not hardcoded 1. */
     struct qrtr_ctrl_pkt hello = { 0 };
     hello.cmd = QRTR_TYPE_HELLO;
 
     struct sockaddr_qrtr_compat ctrl = { 0 };
     ctrl.sq_family = AF_QIPCRTR;
-    ctrl.sq_node   = 1;                 /* local-node control */
+    ctrl.sq_node   = g_my_node;
     ctrl.sq_port   = QRTR_PORT_CTRL;
-
-    /* HELLO is optional; ignore errors. */
     (void)sendto(g_sock, &hello, sizeof(hello), 0,
                  (struct sockaddr *)&ctrl, sizeof(ctrl));
 
@@ -120,7 +134,7 @@ static int send_new_lookup(uint32_t service, uint32_t instance) {
 
     struct sockaddr_qrtr_compat ctrl = { 0 };
     ctrl.sq_family = AF_QIPCRTR;
-    ctrl.sq_node   = 1;
+    ctrl.sq_node   = g_my_node;      /* own local node id */
     ctrl.sq_port   = QRTR_PORT_CTRL;
 
     ssize_t n = sendto(g_sock, &pkt, sizeof(pkt), 0,
