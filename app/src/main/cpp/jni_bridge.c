@@ -1062,15 +1062,76 @@ Java_com_qdiag_bandlock_diag_DiagNative_qrtrClearCellLock(
 /* Returns bitmask of features found; 0 means library not loadable at all.    */
 /* ========================================================================== */
 #include <dlfcn.h>
+#include <android/dlext.h>
+
+/* Android linker-namespace bypass helpers (runtime lookup so we don't have
+ * to link against libdl_android.so which is API-level gated). */
+struct android_namespace_t;
+typedef struct android_namespace_t* (*p_android_get_exported_namespace_t)(const char *name);
+typedef void* (*p_android_dlopen_ext_t)(const char *filename, int flag,
+                                        const android_dlextinfo *extinfo);
+
+static p_android_get_exported_namespace_t p_get_ns = NULL;
+static p_android_dlopen_ext_t             p_dlopen_ext = NULL;
+
+static void init_ns_api(void) {
+    static int tried = 0;
+    if (tried) return;
+    tried = 1;
+    void *libdl = dlopen("libdl_android.so", RTLD_NOW);
+    if (!libdl) libdl = dlopen("libdl.so", RTLD_NOW);
+    if (libdl) {
+        p_get_ns = (p_android_get_exported_namespace_t)
+                   dlsym(libdl, "android_get_exported_namespace");
+    }
+    /* android_dlopen_ext is exported by the linker stub; standard dlsym
+     * against RTLD_DEFAULT usually finds it. */
+    p_dlopen_ext = (p_android_dlopen_ext_t)dlsym(RTLD_DEFAULT, "android_dlopen_ext");
+    LOGI("vendor-qmi: ns api get_exported_namespace=%p android_dlopen_ext=%p",
+         p_get_ns, p_dlopen_ext);
+}
+
+static void *try_dlopen_ns(const char *path, const char *ns_name) {
+    init_ns_api();
+    if (!p_get_ns || !p_dlopen_ext) return NULL;
+    struct android_namespace_t *ns = p_get_ns(ns_name);
+    if (!ns) {
+        LOGI("vendor-qmi: ns[%s] not exported", ns_name);
+        return NULL;
+    }
+    android_dlextinfo info = { 0 };
+    info.flags = ANDROID_DLEXT_USE_NAMESPACE;
+    info.library_namespace = ns;
+    void *h = p_dlopen_ext(path, RTLD_NOW | RTLD_GLOBAL, &info);
+    if (h) {
+        LOGI("vendor-qmi: dlopen_ext[ns=%s] OK %s -> %p", ns_name, path, h);
+    } else {
+        LOGI("vendor-qmi: dlopen_ext[ns=%s] FAIL %s: %s", ns_name, path, dlerror());
+    }
+    return h;
+}
 
 static void *try_dlopen(const char *path) {
+    /* Try plain dlopen first (works inside our own classloader namespace
+     * only for whitelisted public vendor libs). */
     void *h = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
     if (h) {
         LOGI("vendor-qmi: dlopen OK %s -> %p", path, h);
-    } else {
-        LOGE("vendor-qmi: dlopen FAIL %s: %s", path, dlerror());
+        return h;
     }
-    return h;
+    LOGI("vendor-qmi: dlopen plain FAIL %s: %s", path, dlerror());
+
+    /* Fall back to the exported namespaces that grant access to /vendor. */
+    static const char *ns_names[] = {
+        "sphal", "vndk", "vndk_in_system", "default", "system",
+        "rs", "product", NULL,
+    };
+    for (int i = 0; ns_names[i]; i++) {
+        h = try_dlopen_ns(path, ns_names[i]);
+        if (h) return h;
+    }
+    LOGE("vendor-qmi: dlopen FAIL %s (all namespaces refused)", path);
+    return NULL;
 }
 
 JNIEXPORT jint JNICALL
