@@ -33,35 +33,51 @@ enum class DesignVariant { Nsg, Glass }
 val LocalDesignVariant = staticCompositionLocalOf { DesignVariant.Nsg }
 
 object GlassColors {
-    /* Deep graphite / navy backdrop — barely gradient, almost flat. */
-    val BgTop = Color(0xFF0E1218)
-    val BgMid = Color(0xFF12172A)
-    val BgBot = Color(0xFF0B0E18)
+    /* Deep navy backdrop sampled from the FoxikNetwork premium mockup. */
+    val BgTop = Color(0xFF0A0E1F)
+    val BgMid = Color(0xFF141832)
+    val BgBot = Color(0xFF05080F)
 
-    /* Muted, desaturated glow blobs — barely perceptible. */
-    val BlobBlue   = Color(0xFF3B5B88)
-    val BlobPurple = Color(0xFF4A3E6B)
-    val BlobTeal   = Color(0xFF2F5A64)
+    /* Soft aurora-like glow blobs behind the cards — desaturated navy/purple. */
+    val BlobBlue   = Color(0xFF2D4A7E)
+    val BlobPurple = Color(0xFF3C2F5E)
+    val BlobTeal   = Color(0xFF1F3E58)
 
     /* Frosted glass panel fill + highlight border (on dark backdrop). */
-    val PanelFill       = Color(0xFFFFFFFF).copy(alpha = 0.06f)
-    val PanelFillStrong = Color(0xFFFFFFFF).copy(alpha = 0.10f)
-    val PanelBorder     = Color(0xFFFFFFFF).copy(alpha = 0.22f)
-    val PanelBorderSoft = Color(0xFFFFFFFF).copy(alpha = 0.05f)
+    val PanelFill       = Color(0xFFFFFFFF).copy(alpha = 0.07f)
+    val PanelFillStrong = Color(0xFFFFFFFF).copy(alpha = 0.12f)
+    val PanelBorder     = Color(0xFFFFFFFF).copy(alpha = 0.32f)
+    val PanelBorderSoft = Color(0xFFFFFFFF).copy(alpha = 0.06f)
 
     /* Typography — light text on dark glass. */
-    val TextPrimary   = Color(0xFFF2F3F5)
-    val TextSecondary = Color(0xFFB8BDC7)
-    val TextTertiary  = Color(0xFF6E737D)
+    val TextPrimary   = Color(0xFFF5F7FA)
+    val TextSecondary = Color(0xFFAAB1C3)
+    val TextTertiary  = Color(0xFF6A6F80)
 
     /* Dividers. */
-    val DividerSoft = Color(0xFFFFFFFF).copy(alpha = 0.06f)
+    val DividerSoft = Color(0xFFFFFFFF).copy(alpha = 0.07f)
 
-    /* iOS dark-mode system blue. */
-    val Accent      = Color(0xFF0A84FF)
-    val AccentLight = Color(0xFF4DA3FF)
-    val AccentDark  = Color(0xFF0051D5)
-    val AccentRed   = Color(0xFFFF453A)
+    /* Accent blue sampled from the brand mark + Apply pill + checkbox fill. */
+    val Accent       = Color(0xFF3C8EF5)
+    val AccentLight  = Color(0xFF7AB5FF)
+    val AccentDark   = Color(0xFF1E5FB8)
+    val AccentDeep   = Color(0xFF0F3F8A)
+
+    /* Gradient stops for the big Apply-pill. */
+    val PillGradTop    = Color(0xFF89C1FF)   // top specular sheen
+    val PillGradCenter = Color(0xFF3C8EF5)
+    val PillGradEdge   = Color(0xFF1E5FB8)
+
+    /* Coral-red used for RAT titles ("LTE · Testing (Available)"). */
+    val AccentRed = Color(0xFFFF5E55)
+
+    /* Channel-number (DL/UL) blue — sampled from 1425 / 19425. */
+    val ChannelBlue = Color(0xFF5BA8FF)
+
+    /* Signal-strength ramp for RSRP/RSRQ gauge bars (mockup-matched). */
+    val BarGreen = Color(0xFF6DD97A)
+    val BarAmber = Color(0xFFF2B24C)
+    val BarRed   = Color(0xFFE26A34)
 }
 
 /** Full-screen graphite-navy gradient + very soft muted blobs.
@@ -134,20 +150,29 @@ fun Modifier.glassPill(): Modifier = this
         shape = RoundedCornerShape(100),
     )
 
-/** iOS-blue primary pill — vertical gradient fill + top highlight. */
+/** iOS-blue primary pill — horizontal "dark-edge → bright-center → dark-edge"
+ *  fill with a subtle top specular sheen, matching the premium mockup. */
 fun Modifier.glassPrimaryPill(): Modifier = this
     .clip(RoundedCornerShape(100))
     .background(
+        Brush.horizontalGradient(
+            0.00f to GlassColors.PillGradEdge,
+            0.50f to GlassColors.PillGradCenter,
+            1.00f to GlassColors.PillGradEdge,
+        ),
+    )
+    .background(
         Brush.verticalGradient(
-            0.0f to GlassColors.AccentLight,
-            1.0f to GlassColors.AccentDark,
+            0.00f to GlassColors.PillGradTop.copy(alpha = 0.55f),
+            0.55f to Color.Transparent,
+            1.00f to Color.Black.copy(alpha = 0.18f),
         ),
     )
     .border(
         width = 1.dp,
         brush = Brush.verticalGradient(
-            0.0f to Color.White.copy(alpha = 0.45f),
-            1.0f to Color.White.copy(alpha = 0.08f),
+            0.0f to Color.White.copy(alpha = 0.55f),
+            1.0f to Color.White.copy(alpha = 0.10f),
         ),
         shape = RoundedCornerShape(100),
     )
