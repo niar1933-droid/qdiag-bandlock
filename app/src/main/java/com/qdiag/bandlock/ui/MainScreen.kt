@@ -301,7 +301,7 @@ private fun GlassHome(
                     .fillMaxWidth()
                     .height(52.dp)
                     .glassPrimaryPill()
-                    .clickable(enabled = !state.busy) { vm.applyBandPreferenceQrtr() },
+                    .clickable(enabled = !state.busy) { vm.applyBandPreferenceCci() },
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
@@ -489,7 +489,7 @@ private fun BandLockPanel(state: UiState, vm: MainViewModel) {
 
         Spacer(Modifier.height(10.dp))
         Button(
-            onClick = vm::applyBandPreferenceQrtr,
+            onClick = vm::applyBandPreferenceCci,
             enabled = !state.busy,
             modifier = Modifier.fillMaxWidth().height(44.dp),
             colors = ButtonDefaults.buttonColors(
@@ -630,7 +630,7 @@ private fun GlassBandLockPanel(state: UiState, vm: MainViewModel) {
                 .fillMaxWidth()
                 .height(50.dp)
                 .glassPrimaryPill()
-                .clickable(enabled = !state.busy) { vm.applyBandPreferenceQrtr() },
+                .clickable(enabled = !state.busy) { vm.applyBandPreferenceCci() },
             contentAlignment = Alignment.Center,
         ) {
             Text(

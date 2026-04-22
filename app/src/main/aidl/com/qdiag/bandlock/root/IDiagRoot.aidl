@@ -139,4 +139,14 @@ interface IDiagRoot {
      *  + deps, resolve classic Qualcomm QMI entrypoints. Returns 0 if library
      *  cannot be loaded at all; else 0x10000|symbolMask. See DiagNative kdoc. */
     int qmiVendorProbe(String nativeLibDir);
+
+    /** Phase 14 CCI-path band lock. Runs qdiag_helper lock <masks> as root,
+     *  which sends QMI_NAS_SET_SYSTEM_SELECTION_PREFERENCE (0x0033) via
+     *  qmi_client_send_raw_msg_sync — the only transport that works on
+     *  X70/HyperOS where classic /dev/diag + QRTR paths are blocked.
+     *  Returns 0 on success, 0x10000|qmi_result on QMI error, 0xFFFF0000|low16
+     *  on transport failure. */
+    int cciSetBandPreference(String nativeLibDir,
+                             long lteBandMaskLow, long lteBandMaskHigh,
+                             long nrBandMaskLow,  long nrBandMaskHigh);
 }

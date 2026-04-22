@@ -772,11 +772,18 @@ static void sweep_msg_ids(void *handle, const char *tag,
  */
 #define IDL_DUMP_MAX 256
 
-typedef struct {
+/* Phase 14: proven entry size = 6 bytes (not 16).
+ * NAS:    req_ptr=0x..A61C, resp_ptr=0x..AB68; distance 0x54C = 1356 bytes
+ *         ÷ 226 entries = 6 bytes each.
+ * NASEXT: distance 0x4E = 78 bytes ÷ 13 entries = 6 bytes each.
+ *
+ * Likely layout: { msg_id:u16, max_size:u16, desc_idx:u16 } — the TLV
+ * descriptor isn't a raw pointer (doesn't fit in 6 bytes) but an index
+ * into a separate descriptor blob referenced at service_object +0x30. */
+typedef struct __attribute__((packed)) {
     uint16_t msg_id;
-    uint16_t flags;
-    uint32_t max_size;
-    const void *tlv_desc;
+    uint16_t max_size;
+    uint16_t desc_idx;
 } qmi_idl_msg_entry_t;
 
 static int is_probably_readable(const void *p) {
@@ -827,29 +834,26 @@ static void dump_service_object_table(const char *tag, const void *sobj) {
 
     if (is_probably_readable(req_tbl) && num_req > 0) {
         uint32_t n = num_req > IDL_DUMP_MAX ? IDL_DUMP_MAX : num_req;
-        HOUT("IDL %-6s REQ table (%u entries):\n", tag, n);
+        HOUT("IDL %-6s REQ table (%u entries, 6B each):\n", tag, n);
         for (uint32_t i = 0; i < n; i++) {
-            HOUT("  REQ  0x%04X flags=0x%04x max_size=%u tlv=%p\n",
-                 req_tbl[i].msg_id, req_tbl[i].flags,
-                 req_tbl[i].max_size, req_tbl[i].tlv_desc);
+            HOUT("  REQ  0x%04X max_size=%u desc_idx=0x%04X\n",
+                 req_tbl[i].msg_id, req_tbl[i].max_size, req_tbl[i].desc_idx);
         }
     }
     if (is_probably_readable(resp_tbl) && num_resp > 0) {
         uint32_t n = num_resp > IDL_DUMP_MAX ? IDL_DUMP_MAX : num_resp;
-        HOUT("IDL %-6s RESP table (%u entries):\n", tag, n);
+        HOUT("IDL %-6s RESP table (%u entries, 6B each):\n", tag, n);
         for (uint32_t i = 0; i < n; i++) {
-            HOUT("  RESP 0x%04X flags=0x%04x max_size=%u tlv=%p\n",
-                 resp_tbl[i].msg_id, resp_tbl[i].flags,
-                 resp_tbl[i].max_size, resp_tbl[i].tlv_desc);
+            HOUT("  RESP 0x%04X max_size=%u desc_idx=0x%04X\n",
+                 resp_tbl[i].msg_id, resp_tbl[i].max_size, resp_tbl[i].desc_idx);
         }
     }
     if (is_probably_readable(ind_tbl) && num_ind > 0) {
         uint32_t n = num_ind > IDL_DUMP_MAX ? IDL_DUMP_MAX : num_ind;
-        HOUT("IDL %-6s IND  table (%u entries):\n", tag, n);
+        HOUT("IDL %-6s IND  table (%u entries, 6B each):\n", tag, n);
         for (uint32_t i = 0; i < n; i++) {
-            HOUT("  IND  0x%04X flags=0x%04x max_size=%u tlv=%p\n",
-                 ind_tbl[i].msg_id, ind_tbl[i].flags,
-                 ind_tbl[i].max_size, ind_tbl[i].tlv_desc);
+            HOUT("  IND  0x%04X max_size=%u desc_idx=0x%04X\n",
+                 ind_tbl[i].msg_id, ind_tbl[i].max_size, ind_tbl[i].desc_idx);
         }
     }
 }
@@ -1273,11 +1277,158 @@ static void probe(void) {
     if (g_log_fp) { fclose(g_log_fp); g_log_fp = NULL; }
 }
 
+/* ---------- Phase 14: CCI band-lock mode (standalone) ----------
+ *
+ * Usage: qdiag_helper lock <lte_low_hex> <lte_high_hex> <nr_low_hex> <nr_high_hex>
+ *
+ * Writes a short line to /data/local/tmp/qdiag_helper.log AND to stdout:
+ *   LOCK_RESULT rc=<transport_rc> result_code=<qmi_result> err_code=<qmi_err>
+ *
+ * Exit code mirrors the parsed result_code (0 = success, 1 = QMI error)
+ * so the Kotlin caller can check $?. On transport failure, rc != 0 and
+ * exit code = 2.
+ *
+ * This is the MINIMAL CCI-based SET_SYSTEM_SELECTION_PREFERENCE path:
+ *   1. dlopen the three libs we know hold NAS (libqmiservices +
+ *      libqmi_cci + libqmi_encdec)
+ *   2. lookup the nas_qmi_idl_service_object_v01 pointer
+ *   3. qmi_client_init_instance -> get NAS handle
+ *   4. craft 0x0033 request body with the same TLV layout qmi_nas.c uses
+ *      for the DIAG path (TLV 0x11 legacy + 0x12 mode + 0x1C lte_ext +
+ *      0x24 nr_sa + 0x25 nr_nsa)
+ *   5. qmi_client_send_raw_msg_sync (proven-working on X70, Phase 12)
+ *   6. parse response for result/err TLV, print line, release handle, exit.
+ */
+
+/* Hex TLV helper: [type:u8][len:u16 LE][value:len]. */
+static size_t lock_put_tlv(uint8_t *buf, size_t off,
+                           uint8_t type, const uint8_t *val, size_t len) {
+    buf[off++] = type;
+    buf[off++] = (uint8_t)(len & 0xFF);
+    buf[off++] = (uint8_t)((len >> 8) & 0xFF);
+    memcpy(buf + off, val, len);
+    return off + len;
+}
+
+static void put_u64_le(uint8_t *dst, uint64_t v) {
+    for (int i = 0; i < 8; i++) dst[i] = (uint8_t)((v >> (8 * i)) & 0xFF);
+}
+
+static int do_lock_bands(uint64_t lte_low, uint64_t lte_high,
+                         uint64_t nr_low,  uint64_t nr_high) {
+    g_log_fp = fopen("/data/local/tmp/qdiag_helper.log", "a");
+    HOUT("=== qdiag_helper lock start ===\n");
+    HOUT("LOCK ARGS lte=0x%016llx%016llx nr=0x%016llx%016llx\n",
+         (unsigned long long)lte_high, (unsigned long long)lte_low,
+         (unsigned long long)nr_high,  (unsigned long long)nr_low);
+
+    install_fault_handler();
+
+    /* Open enough of vendor lib set for NAS + CCI to resolve. */
+    static const char *fixed_deps[] = {
+        "/vendor/lib64/libqmi_cci.so",
+        "/vendor/lib64/libqmi_encdec.so",
+        "/vendor/lib64/libqmiservices.so",
+        NULL
+    };
+    for (int i = 0; fixed_deps[i]; i++) {
+        void *h = dlopen(fixed_deps[i], RTLD_NOW | RTLD_GLOBAL);
+        if (!h) {
+            HOUT("LOCK dlopen FAIL %s: %s\n", fixed_deps[i], dlerror());
+        } else {
+            HOUT("LOCK dep OK %s\n", fixed_deps[i]);
+        }
+    }
+
+    /* Find NAS service object. */
+    void *sobj_nas = lookup_service_obj("nas_get_service_object_internal_v01",
+                                        "nas_qmi_idl_service_object_v01");
+    if (!sobj_nas) {
+        HOUT("LOCK_RESULT rc=-1 result_code=0 err_code=0  (no sobj)\n");
+        return 2;
+    }
+
+    qmi_client_init_instance_fn init_fn =
+        (qmi_client_init_instance_fn) dlsym(RTLD_DEFAULT, "qmi_client_init_instance");
+    qmi_client_release_fn release_fn =
+        (qmi_client_release_fn) dlsym(RTLD_DEFAULT, "qmi_client_release");
+    qmi_client_send_raw_msg_sync_fn raw_fn =
+        (qmi_client_send_raw_msg_sync_fn) dlsym(RTLD_DEFAULT,
+                                                "qmi_client_send_raw_msg_sync");
+    if (!init_fn || !release_fn || !raw_fn) {
+        HOUT("LOCK_RESULT rc=-2 result_code=0 err_code=0  (missing sym init=%p rel=%p raw=%p)\n",
+             (void *)init_fn, (void *)release_fn, (void *)raw_fn);
+        return 2;
+    }
+
+    void *h = NULL;
+    int rc = init_fn(sobj_nas, 0, NULL, NULL, NULL, 5000, &h);
+    if (rc != 0 || !h) {
+        HOUT("LOCK_RESULT rc=%d result_code=0 err_code=0  (init failed)\n", rc);
+        return 2;
+    }
+    HOUT("LOCK init OK handle=%p\n", h);
+
+    /* Build TLV body. Same field order as qmi_nas.c. */
+    uint8_t tlvs[256];
+    size_t  o = 0;
+    /* TLV 0x11 legacy band pref (u64 LE) — low 64 bits of LTE. */
+    uint8_t legacy[8]; put_u64_le(legacy, lte_low);
+    o = lock_put_tlv(tlvs, o, 0x11, legacy, sizeof(legacy));
+    /* TLV 0x12 mode pref: allow all RATs so modem picks from the masks. */
+    uint8_t mode[2] = { 0xFF, 0x00 };
+    o = lock_put_tlv(tlvs, o, 0x12, mode, sizeof(mode));
+    /* TLV 0x1C lte_band_pref_ext (u64 low + u64 high = 128 bits). */
+    uint8_t lte_ext[16]; put_u64_le(lte_ext, lte_low); put_u64_le(lte_ext + 8, lte_high);
+    o = lock_put_tlv(tlvs, o, 0x1C, lte_ext, sizeof(lte_ext));
+    /* TLV 0x24 nr5g_sa_band_pref (128 bits). */
+    uint8_t nr[16]; put_u64_le(nr, nr_low); put_u64_le(nr + 8, nr_high);
+    o = lock_put_tlv(tlvs, o, 0x24, nr, sizeof(nr));
+    /* TLV 0x25 nr5g_nsa_band_pref (128 bits, same mask). */
+    o = lock_put_tlv(tlvs, o, 0x25, nr, sizeof(nr));
+
+    HOUT("LOCK req %zu bytes: ", o);
+    for (size_t i = 0; i < o && i < 128; i++) HOUT("%02X ", tlvs[i]);
+    HOUT("\n");
+
+    /* Send 0x0033 SET_SYSTEM_SELECTION_PREFERENCE. */
+    uint8_t resp[2048];
+    unsigned int resp_len = 0;
+    int srv = raw_fn(h, 0x0033, tlvs, (unsigned int)o,
+                     resp, sizeof(resp), &resp_len, 5000);
+    HOUT("LOCK send rc=%d resp_len=%u\n", srv, resp_len);
+
+    uint16_t rcode = 0xFFFF, ecode = 0xFFFF;
+    if (srv == 0 && resp_len >= 7) {
+        parse_qmi_tlvs("LOCK", resp, resp_len);
+        /* Mandatory RESULT TLV is at +0: type=0x02 len=4 rc:u16 ec:u16. */
+        if (resp[0] == 0x02 && resp[1] == 0x04) {
+            rcode = (uint16_t)(resp[3] | (resp[4] << 8));
+            ecode = (uint16_t)(resp[5] | (resp[6] << 8));
+        }
+    }
+
+    release_fn(h);
+    HOUT("LOCK_RESULT rc=%d result_code=%u err_code=%u\n", srv, rcode, ecode);
+    HOUT("=== qdiag_helper lock end ===\n");
+    if (g_log_fp) { fclose(g_log_fp); g_log_fp = NULL; }
+    return (srv == 0 && rcode == 0) ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], "probe") == 0) {
         probe();
         return 0;
     }
-    fprintf(stderr, "usage: %s probe\n", argv[0]);
+    if (argc >= 6 && strcmp(argv[1], "lock") == 0) {
+        uint64_t ll = strtoull(argv[2], NULL, 0);
+        uint64_t lh = strtoull(argv[3], NULL, 0);
+        uint64_t nl = strtoull(argv[4], NULL, 0);
+        uint64_t nh = strtoull(argv[5], NULL, 0);
+        return do_lock_bands(ll, lh, nl, nh);
+    }
+    fprintf(stderr, "usage: %s probe\n"
+                    "       %s lock <lte_low_hex> <lte_high_hex> <nr_low_hex> <nr_high_hex>\n",
+            argv[0], argv[0]);
     return 2;
 }
