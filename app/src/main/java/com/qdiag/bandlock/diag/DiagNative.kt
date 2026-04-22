@@ -97,6 +97,14 @@ object DiagNative {
         lteLow: Long, lteHigh: Long, nrLow: Long, nrHigh: Long,
     ): Int
 
+    /** Probe several NV item IDs + layouts for LTE cell lock via
+     *  QMI_DMS_WRITE_NV_ITEM over QRTR (bypasses /dev/diag). See logcat
+     *  tag qdiag-jni for per-probe detail. */
+    @JvmStatic external fun qrtrProbeCellLock(earfcn: Int, pci: Int): Int
+
+    /** Clear any NV-item cell lock set by qrtrProbeCellLock. */
+    @JvmStatic external fun qrtrClearCellLock(): Int
+
     /* ---------- DIAG sniffer (background HDLC-decoded frame capture) ---------- */
 
     @JvmStatic external fun snifferStart(): Boolean

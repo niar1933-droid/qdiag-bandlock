@@ -116,4 +116,16 @@ interface IDiagRoot {
     /** Apply LTE+NR band preference via QMI NAS over qmuxd.
      *  Bypasses /dev/diag AND kernel-ns filtering on HyperOS. */
     int qmuxSetBandPref(long lteLow, long lteHigh, long nrLow, long nrHigh);
+
+    /* ---------- QRTR DMS WRITE_NV probe (Cell Lock without /dev/diag) ------ */
+
+    /** Probe several candidate NV item IDs + payload layouts for LTE cell
+     *  lock via QMI_DMS_WRITE_NV_ITEM (msg 0x003D) over QRTR. See logcat
+     *  tag qdiag-jni for per-probe result. Returns 0 if at least one
+     *  probe succeeded, (0x10000 | 0x003E) if all were rejected, or a
+     *  negative QRTR transport error. */
+    int qrtrProbeCellLock(int earfcn, int pci);
+
+    /** Clear any NV-item cell lock set by qrtrProbeCellLock. */
+    int qrtrClearCellLock();
 }

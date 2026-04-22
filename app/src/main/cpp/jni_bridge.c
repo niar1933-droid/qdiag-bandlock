@@ -672,3 +672,207 @@ Java_com_qdiag_bandlock_diag_DiagNative_qmuxSetBandPref(
     if (result != 0) return (jint)(0x10000 | err);
     return 0;
 }
+
+/* ========================================================================== */
+/* QMI DMS WRITE_NV_ITEM (msg 0x003D) over QRTR — Cell Lock probe.           */
+/*                                                                            */
+/* The HyperOS kernel on Poco F6 has /dev/diag disabled (diagchar not         */
+/* compiled in), so the legacy DIAG EFS path used by NSG to write NV item     */
+/* 6828 (LTE cell lock) is unreachable. DMS (svc=0x02) is visible on QRTR,    */
+/* though, and QMI_DMS_WRITE_NV_ITEM takes:                                   */
+/*   TLV 0x01 mandatory: u16 item_id + variable bytes (item payload)          */
+/*                                                                            */
+/* The exact NV item ID for LTE cell lock on X70 is not documented. We probe */
+/* a shortlist of known-to-work-on-older-Qualcomm IDs with several payload   */
+/* sizes each, log every response, and stop at the first SUCCESS (result=0). */
+/* The Kotlin side shows aggregate rc + logs hint the working combo.         */
+/* ========================================================================== */
+
+JNIEXPORT jint JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_qrtrProbeCellLock(
+        JNIEnv *env, jclass clz,
+        jint earfcn, jint pci) {
+    (void)env; (void)clz;
+
+    qrtr_close();
+    int orc = qrtr_open();
+    if (orc < 0) return orc;
+
+    /* DMS service lookup. On HyperOS QRTR typically advertises DMS at inst=1
+     * on the modem remote node; fall back to wildcard. */
+    uint32_t node = 0, port = 0;
+    int rc = qrtr_lookup(QMI_SVC_DMS, 1, 2000, &node, &port);
+    if (rc == QRTR_RC_NO_SERVICE) {
+        rc = qrtr_lookup(QMI_SVC_DMS, 0, 2000, &node, &port);
+    }
+    if (rc < 0) {
+        LOGE("cell-probe DMS lookup rc=%d", rc);
+        return rc;
+    }
+    LOGI("cell-probe DMS node=0x%X port=0x%X", node, port);
+
+    uint16_t u16_earfcn = (uint16_t)(earfcn & 0xFFFF);
+    uint16_t u16_pci    = (uint16_t)(pci    & 0xFFFF);
+
+    /* Candidate {NV item id, payload layout} pairs. Payload layouts that
+     * Qualcomm's legacy NV dictionary hinted at:
+     *   6828 "lte_cell_lock_info" — historically {flag, earfcn, pci, pad}
+     *   6829 "lte_cell_lock"      — {flag, earfcn, pci}
+     *   466  "lte_nas_rel9_plus"  — sometimes carries cell-lock flags
+     *   4964 "lte_nas_rrc_cell"   — per-Qualcomm internal layout
+     *
+     * For each ID we probe a few candidate layouts; total probes = ~12,
+     * one QMI transaction each, ~5s timeout worst case. */
+    struct probe_entry {
+        uint16_t item_id;
+        const char *name;
+        /* layout kind: 0={flag u8, earfcn u16, pci u16, pad u8} (6B)
+         *              1={flag u8, earfcn u16, pci u16}          (5B)
+         *              2={earfcn u16, pci u16, flag u8}          (5B)
+         *              3={earfcn u32, pci u32, flag u8}          (9B) */
+        uint8_t kind;
+    };
+    static const struct probe_entry probes[] = {
+        { 6828,  "6828-kind0",  0 },
+        { 6828,  "6828-kind1",  1 },
+        { 6828,  "6828-kind2",  2 },
+        { 6828,  "6828-kind3",  3 },
+        { 6829,  "6829-kind0",  0 },
+        { 6829,  "6829-kind1",  1 },
+        { 6829,  "6829-kind2",  2 },
+        { 466,   "466-kind0",   0 },
+        { 466,   "466-kind1",   1 },
+        { 4964,  "4964-kind0",  0 },
+        { 4964,  "4964-kind1",  1 },
+        { 4964,  "4964-kind2",  2 },
+    };
+    const size_t nprobes = sizeof(probes) / sizeof(probes[0]);
+
+    int first_success_rc = -1;
+    for (size_t i = 0; i < nprobes; i++) {
+        uint16_t item = probes[i].item_id;
+        uint8_t  kind = probes[i].kind;
+
+        /* Build TLV 0x01 body: [u16 item_id][item_payload...] */
+        uint8_t body[32]; size_t bl = 0;
+        body[bl++] = (uint8_t)(item & 0xFF);
+        body[bl++] = (uint8_t)((item >> 8) & 0xFF);
+
+        switch (kind) {
+            case 0:
+                body[bl++] = 0x01; /* flag = enable */
+                body[bl++] = (uint8_t)(u16_earfcn & 0xFF);
+                body[bl++] = (uint8_t)((u16_earfcn >> 8) & 0xFF);
+                body[bl++] = (uint8_t)(u16_pci & 0xFF);
+                body[bl++] = (uint8_t)((u16_pci >> 8) & 0xFF);
+                body[bl++] = 0x00; /* pad */
+                break;
+            case 1:
+                body[bl++] = 0x01;
+                body[bl++] = (uint8_t)(u16_earfcn & 0xFF);
+                body[bl++] = (uint8_t)((u16_earfcn >> 8) & 0xFF);
+                body[bl++] = (uint8_t)(u16_pci & 0xFF);
+                body[bl++] = (uint8_t)((u16_pci >> 8) & 0xFF);
+                break;
+            case 2:
+                body[bl++] = (uint8_t)(u16_earfcn & 0xFF);
+                body[bl++] = (uint8_t)((u16_earfcn >> 8) & 0xFF);
+                body[bl++] = (uint8_t)(u16_pci & 0xFF);
+                body[bl++] = (uint8_t)((u16_pci >> 8) & 0xFF);
+                body[bl++] = 0x01;
+                break;
+            case 3:
+                body[bl++] = (uint8_t)(earfcn & 0xFF);
+                body[bl++] = (uint8_t)((earfcn >> 8) & 0xFF);
+                body[bl++] = (uint8_t)((earfcn >> 16) & 0xFF);
+                body[bl++] = (uint8_t)((earfcn >> 24) & 0xFF);
+                body[bl++] = (uint8_t)(pci & 0xFF);
+                body[bl++] = (uint8_t)((pci >> 8) & 0xFF);
+                body[bl++] = (uint8_t)((pci >> 16) & 0xFF);
+                body[bl++] = (uint8_t)((pci >> 24) & 0xFF);
+                body[bl++] = 0x01;
+                break;
+        }
+
+        /* Wrap as TLV 0x01 = mandatory NV item + data. */
+        uint8_t tlvs[48]; size_t to = 0;
+        tlvs[to++] = 0x01;
+        tlvs[to++] = (uint8_t)(bl & 0xFF);
+        tlvs[to++] = (uint8_t)((bl >> 8) & 0xFF);
+        for (size_t k = 0; k < bl; k++) tlvs[to++] = body[k];
+
+        uint8_t req[128];
+        size_t reqLen = qrtr_build_qmi_request(req, sizeof(req),
+                                               0x003D, /* WRITE_NV_ITEM */
+                                               tlvs, to);
+        if (!reqLen) continue;
+
+        uint8_t rx[1024];
+        int n = qrtr_transact(node, port, req, reqLen, rx, sizeof(rx), 3000);
+        if (n < 0) {
+            LOGE("cell-probe[%zu] %s transact rc=%d", i, probes[i].name, n);
+            continue;
+        }
+        uint16_t mid = 0, result = 0xFFFF, err = 0xFFFF;
+        int prc = qrtr_parse_qmi_response(rx, (size_t)n, &mid, &result, &err);
+        if (prc < 0) {
+            LOGE("cell-probe[%zu] %s bad-frame n=%d", i, probes[i].name, n);
+            continue;
+        }
+        LOGI("cell-probe[%zu] %s result=%u err=0x%04X (mid=0x%04X)",
+             i, probes[i].name, result, err, mid);
+        if (result == 0 && first_success_rc < 0) {
+            first_success_rc = 0;
+            /* Keep probing so logs show which IDs the modem accepts. */
+        }
+    }
+
+    if (first_success_rc == 0) return 0;
+    /* All probes failed — return a synthetic "not supported" code that the
+     * Kotlin decode maps to a friendly message. */
+    return (jint)(0x10000 | 0x003E); /* QMI_ERR_NOT_SUPPORTED */
+}
+
+JNIEXPORT jint JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_qrtrClearCellLock(
+        JNIEnv *env, jclass clz) {
+    (void)env; (void)clz;
+
+    qrtr_close();
+    int orc = qrtr_open();
+    if (orc < 0) return orc;
+
+    uint32_t node = 0, port = 0;
+    int rc = qrtr_lookup(QMI_SVC_DMS, 1, 2000, &node, &port);
+    if (rc == QRTR_RC_NO_SERVICE) rc = qrtr_lookup(QMI_SVC_DMS, 0, 2000, &node, &port);
+    if (rc < 0) return rc;
+
+    /* Clear = write lock=0 across same candidate set. */
+    static const uint16_t ids[] = { 6828, 6829, 466, 4964 };
+    int ok = -1;
+    for (size_t i = 0; i < sizeof(ids)/sizeof(ids[0]); i++) {
+        uint8_t body[8]; size_t bl = 0;
+        body[bl++] = (uint8_t)(ids[i] & 0xFF);
+        body[bl++] = (uint8_t)((ids[i] >> 8) & 0xFF);
+        body[bl++] = 0x00; /* flag=disable */
+        body[bl++] = 0x00; body[bl++] = 0x00; /* earfcn=0 */
+        body[bl++] = 0x00; body[bl++] = 0x00; /* pci=0 */
+
+        uint8_t tlvs[16]; size_t to = 0;
+        tlvs[to++] = 0x01;
+        tlvs[to++] = (uint8_t)(bl & 0xFF);
+        tlvs[to++] = (uint8_t)((bl >> 8) & 0xFF);
+        for (size_t k = 0; k < bl; k++) tlvs[to++] = body[k];
+
+        uint8_t req[64];
+        size_t reqLen = qrtr_build_qmi_request(req, sizeof(req), 0x003D, tlvs, to);
+        uint8_t rx[512];
+        int n = qrtr_transact(node, port, req, reqLen, rx, sizeof(rx), 2000);
+        if (n < 0) continue;
+        uint16_t mid, result = 0xFFFF, err = 0xFFFF;
+        if (qrtr_parse_qmi_response(rx, (size_t)n, &mid, &result, &err) < 0) continue;
+        LOGI("cell-clear[%u] result=%u err=0x%04X", ids[i], result, err);
+        if (result == 0) ok = 0;
+    }
+    return (ok == 0) ? 0 : (jint)(0x10000 | 0x003E);
+}

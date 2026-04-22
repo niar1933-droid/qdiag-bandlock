@@ -62,6 +62,10 @@ class DiagRootService : RootService() {
         override fun qmuxAllocClient(service: Int): Int = DiagNative.qmuxAllocClient(service)
         override fun qmuxSetBandPref(lteLow: Long, lteHigh: Long, nrLow: Long, nrHigh: Long): Int =
             DiagNative.qmuxSetBandPref(lteLow, lteHigh, nrLow, nrHigh)
+
+        override fun qrtrProbeCellLock(earfcn: Int, pci: Int): Int =
+            DiagNative.qrtrProbeCellLock(earfcn, pci)
+        override fun qrtrClearCellLock(): Int = DiagNative.qrtrClearCellLock()
     }
 
     companion object { private const val TAG = "DiagRootService" }

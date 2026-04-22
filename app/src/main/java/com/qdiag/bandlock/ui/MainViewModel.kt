@@ -335,19 +335,34 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         toast("Reset bands → ${decodeRc(rc)}")
     }
 
+    /** LTE cell lock via QMI DMS WRITE_NV_ITEM over QRTR.
+     *  DIAG is unavailable on HyperOS (no /dev/diag), so we probe several
+     *  NV item IDs + payload layouts and log each result. See logcat
+     *  `qdiag-jni:V` for per-probe detail. */
     fun applyCellLock() = withApi { api ->
-        if (!ensureDiagOpen(api)) return@withApi
         val s = _ui.value
         val earfcn = s.lockEarfcn.toIntOrNull()
         val pci = s.lockPci.toIntOrNull()
         if (earfcn == null || pci == null) { toast("EARFCN and PCI must be integers"); return@withApi }
-        val rc = api.setLteCellLock(earfcn, pci)
-        toast("Lock cell EARFCN=$earfcn PCI=$pci → ${decodeRc(rc)}")
+        if (!api.qrtrIsOpen()) {
+            val orc = api.qrtrOpen()
+            if (orc != 0) { toast("QRTR open FAILED rc=$orc"); return@withApi }
+        }
+        val rc = api.qrtrProbeCellLock(earfcn, pci)
+        val hint = when {
+            rc == 0 -> "OK (see logcat qdiag-jni for which NV layout worked)"
+            rc == (0x10000 or 0x003E) -> "NOT_SUPPORTED — модем отверг все NV IDs (см. логи)"
+            else -> decodeRc(rc)
+        }
+        toast("Lock cell EARFCN=$earfcn PCI=$pci → $hint")
     }
 
     fun clearCellLock() = withApi { api ->
-        if (!ensureDiagOpen(api)) return@withApi
-        val rc = api.clearLteCellLock()
+        if (!api.qrtrIsOpen()) {
+            val orc = api.qrtrOpen()
+            if (orc != 0) { toast("QRTR open FAILED rc=$orc"); return@withApi }
+        }
+        val rc = api.qrtrClearCellLock()
         toast("Clear cell lock → ${decodeRc(rc)}")
     }
 
