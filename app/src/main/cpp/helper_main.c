@@ -433,6 +433,57 @@ typedef int (*qmi_client_send_msg_sync_fn)(
     unsigned int resp_c_struct_len,
     unsigned int timeout_msecs);
 
+/* qmi_client_send_raw_msg_sync — exported from libqmi_cci.so on X70.
+ * Takes raw TLV bytes for req + resp (no c-struct marshalling), which
+ * lets us call ANY msg_id without having the IDL headers. Signature
+ * stable across all MSM CCI builds. */
+typedef int (*qmi_client_send_raw_msg_sync_fn)(
+    void *client_handle,
+    unsigned int msg_id,
+    void *req_buf,
+    unsigned int req_buf_len,
+    void *resp_buf,
+    unsigned int resp_buf_len,
+    unsigned int *resp_len_out,
+    unsigned int timeout_msecs);
+
+/* Parse a QMI response payload as a stream of TLVs. Format is
+ * [type:u8][length:u16 LE][value:length]. Returns number of TLVs found. */
+static int parse_qmi_tlvs(const char *tag, const unsigned char *buf, size_t n) {
+    size_t p = 0;
+    int tlv_count = 0;
+    while (p + 3 <= n) {
+        uint8_t  t  = buf[p];
+        uint16_t l  = (uint16_t)(buf[p + 1] | (buf[p + 2] << 8));
+        if (p + 3 + l > n) {
+            HOUT("   TLV[%s] @ +%zu type=0x%02X len=%u TRUNCATED\n",
+                 tag, p, t, l);
+            break;
+        }
+        /* Log first 32 value bytes as hex. */
+        char vhex[3 * 32 + 1];
+        int vp = 0;
+        size_t vcap = (l > 32) ? 32 : l;
+        for (size_t i = 0; i < vcap; i++) {
+            vp += snprintf(vhex + vp, sizeof(vhex) - vp, "%02X ", buf[p + 3 + i]);
+        }
+        vhex[vp] = 0;
+        const char *kind = (t == 0x02) ? "RESULT" : "";
+        HOUT("   TLV[%s] @ +%zu type=0x%02X len=%3u %s : %s%s\n",
+             tag, p, t, l, kind, vhex, (l > 32) ? "..." : "");
+        /* Special decode for the mandatory RESULT TLV (0x02, always 4 bytes:
+         * result_code:u16 LE, err_code:u16 LE). Present in every response. */
+        if (t == 0x02 && l == 4) {
+            uint16_t rc = (uint16_t)(buf[p + 3] | (buf[p + 4] << 8));
+            uint16_t ec = (uint16_t)(buf[p + 5] | (buf[p + 6] << 8));
+            HOUT("     result_code=%u  err_code=%u\n", rc, ec);
+        }
+        p += 3 + l;
+        tlv_count++;
+    }
+    return tlv_count;
+}
+
 static void hex_dump_line(const char *tag, const unsigned char *buf, size_t n) {
     char out[512];
     int pos = 0;
@@ -581,6 +632,63 @@ static void probe_send(void *handle, const char *service_tag,
          service_tag, msg_id, name ? name : "(vendor)", rc, nonzero);
     if (rc == 0 && nonzero > 0) {
         hex_dump_line("   RESP", resp, nonzero < 128 ? nonzero : 128);
+    }
+}
+
+/* Raw-msg send: uses qmi_client_send_raw_msg_sync which accepts raw
+ * TLV bytes for both req and resp, bypassing the c-struct IDL layer.
+ * This is the primary path on X70 now that Phase 11a confirmed the
+ * symbol is exported. */
+static void probe_raw_send(void *handle, const char *tag,
+                           qmi_client_send_raw_msg_sync_fn raw_fn,
+                           unsigned int msg_id,
+                           const unsigned char *req, unsigned int req_len,
+                           const char *name) {
+    unsigned char resp[2048];
+    memset(resp, 0, sizeof(resp));
+    unsigned int resp_len = 0;
+    int rc = raw_fn(handle, msg_id,
+                    (void *)req, req_len,
+                    resp, sizeof(resp),
+                    &resp_len,
+                    3000);
+    HOUT("RAW %-6s 0x%04X %-36s rc=%4d resp_len=%u\n",
+         tag, msg_id, name ? name : "(probe)", rc, resp_len);
+    if (rc == 0 && resp_len > 0) {
+        hex_dump_line("   BYTES", resp, resp_len);
+        parse_qmi_tlvs(tag, resp, resp_len);
+    }
+}
+
+/* Deep-probe the 7 known NAS_EXT opcodes with raw-send. Logs every
+ * TLV returned — gives us the shape of each message so we can tell
+ * GET (returns data TLVs) from SET (returns only result TLV) from
+ * CLEAR (result only, no data). */
+static const unsigned int g_nasext_known_opcodes[] = {
+    0x007A, 0x0087, 0x00A1, 0x00A3, 0x00A4, 0x00DD, 0x00E2, 0
+};
+
+static void sweep_raw_all_accepted(void *handle, const char *tag,
+                                    qmi_client_send_raw_msg_sync_fn raw_fn,
+                                    unsigned int lo, unsigned int hi) {
+    for (unsigned int id = lo; id <= hi; id++) {
+        unsigned char resp[2048];
+        memset(resp, 0, sizeof(resp));
+        unsigned int resp_len = 0;
+        int rc = raw_fn(handle, id, NULL, 0, resp, sizeof(resp),
+                        &resp_len, 500);
+        if (rc == -43) continue;           /* not in IDL, silent */
+        if (rc == 0 && resp_len >= 7) {
+            /* Real TLV response — parse it. */
+            HOUT("RAW %-6s 0x%04X rc=0 resp_len=%u\n", tag, id, resp_len);
+            parse_qmi_tlvs(tag, resp, resp_len);
+        } else if (rc == 0) {
+            HOUT("RAW %-6s 0x%04X rc=0 resp_len=%u (no TLV body)\n",
+                 tag, id, resp_len);
+        } else {
+            HOUT("RAW %-6s 0x%04X rc=%d resp_len=%u (needs req TLV)\n",
+                 tag, id, rc, resp_len);
+        }
     }
 }
 
@@ -804,6 +912,57 @@ static void try_cci_full_rt(const char *tag,
     HOUT("SEND %-6s done, released\n", tag);
 }
 
+/* Raw hex dump of the first [n] bytes at [sobj] — lets the analyst
+ * manually find the real qmi_idl_service_object_s_t offsets for this
+ * stack (Phase 11 revealed our inferred layout is off). */
+static void dump_service_object_bytes(const char *tag, const void *sobj, size_t n) {
+    if (!is_probably_readable(sobj)) {
+        HOUT("SOBJ %-6s %p not readable\n", tag, sobj);
+        return;
+    }
+    if (sigsetjmp(g_fault_jmp, 1) == 0) {
+        g_fault_armed = 1;
+        const unsigned char *p = (const unsigned char *)sobj;
+        /* 16-byte rows for readability. */
+        for (size_t off = 0; off < n; off += 16) {
+            char row[128];
+            int rp = 0;
+            rp += snprintf(row + rp, sizeof(row) - rp, "SOBJ %-6s +0x%02zx:",
+                           tag, off);
+            for (size_t i = 0; i < 16 && off + i < n; i++) {
+                rp += snprintf(row + rp, sizeof(row) - rp, " %02X", p[off + i]);
+            }
+            HOUT("%s\n", row);
+        }
+        g_fault_armed = 0;
+    } else {
+        HOUT("SOBJ %-6s fault during dump\n", tag);
+    }
+}
+
+/* Also try calling qmi_idl_get_max_service_len(service_obj) directly —
+ * exported from libqmi_cci.so, returns the max msg len for the service.
+ * A plausible value (~2K..64K) confirms the service object pointer is
+ * valid; this + the hex dump together pins down the struct layout. */
+typedef unsigned int (*qmi_idl_get_max_service_len_fn)(const void *sobj);
+static void call_max_service_len(const char *tag, const void *sobj) {
+    qmi_idl_get_max_service_len_fn fn =
+        (qmi_idl_get_max_service_len_fn) dlsym(RTLD_DEFAULT,
+                                               "qmi_idl_get_max_service_len");
+    if (!fn) { HOUT("MAXLEN %-6s NO_SYM\n", tag); return; }
+    if (!is_probably_readable(sobj)) {
+        HOUT("MAXLEN %-6s sobj not readable\n", tag); return;
+    }
+    if (sigsetjmp(g_fault_jmp, 1) == 0) {
+        g_fault_armed = 1;
+        unsigned int v = fn(sobj);
+        g_fault_armed = 0;
+        HOUT("MAXLEN %-6s = %u (0x%x)\n", tag, v, v);
+    } else {
+        HOUT("MAXLEN %-6s fault\n", tag);
+    }
+}
+
 /* Safely dump the service object's message table with a SEGV-handler
  * guard — if our inferred struct offsets are wrong for this build of
  * libqmi_encdec, we abort the dump instead of crashing the helper. */
@@ -988,6 +1147,54 @@ static void probe(void) {
     if (sobj_nas)    dump_service_object_guarded("NAS",    sobj_nas);
     if (sobj_nasext) dump_service_object_guarded("NASEXT", sobj_nasext);
     if (sobj_dms)    dump_service_object_guarded("DMS",    sobj_dms);
+
+    /* -------- PHASE 12a: raw hex dump of service-object first 128 bytes + get_max_service_len -------- */
+    HOUT("---- PHASE 12a: service-object hex dump + max_service_len ----\n");
+    if (sobj_nas)    { dump_service_object_bytes("NAS",    sobj_nas,    128); call_max_service_len("NAS",    sobj_nas); }
+    if (sobj_nasext) { dump_service_object_bytes("NASEXT", sobj_nasext, 128); call_max_service_len("NASEXT", sobj_nasext); }
+    if (sobj_dms)    { dump_service_object_bytes("DMS",    sobj_dms,    128); call_max_service_len("DMS",    sobj_dms); }
+
+    /* -------- PHASE 12b: raw-msg send via qmi_client_send_raw_msg_sync -------- */
+    HOUT("---- PHASE 12b: raw-send (TLV-layer) probe ----\n");
+    qmi_client_send_raw_msg_sync_fn raw_fn =
+        (qmi_client_send_raw_msg_sync_fn) dlsym(RTLD_DEFAULT,
+                                                "qmi_client_send_raw_msg_sync");
+    qmi_client_init_instance_fn   init_fn    =
+        (qmi_client_init_instance_fn)   dlsym(RTLD_DEFAULT, "qmi_client_init_instance");
+    qmi_client_release_fn         release_fn =
+        (qmi_client_release_fn)         dlsym(RTLD_DEFAULT, "qmi_client_release");
+
+    if (raw_fn && init_fn && release_fn) {
+        /* Open a NAS client, deep-probe every accepted opcode (raw). */
+        if (sobj_nas) {
+            void *h = NULL;
+            int rc = init_fn(sobj_nas, 0, NULL, NULL, NULL, 5000, &h);
+            HOUT("RAW NAS    init rc=%d handle=%p\n", rc, h);
+            if (rc == 0 && h) {
+                sweep_raw_all_accepted(h, "NAS", raw_fn, 0x0001, 0x01FF);
+                release_fn(h);
+            }
+        }
+        /* NAS_EXT: the 7 known opcodes plus full sweep for any we missed. */
+        if (sobj_nasext) {
+            void *h = NULL;
+            int rc = init_fn(sobj_nasext, 0, NULL, NULL, NULL, 5000, &h);
+            HOUT("RAW NASEXT init rc=%d handle=%p\n", rc, h);
+            if (rc == 0 && h) {
+                HOUT("--- NASEXT known-opcode deep probe ---\n");
+                for (int i = 0; g_nasext_known_opcodes[i]; i++) {
+                    probe_raw_send(h, "NASEXT", raw_fn,
+                                   g_nasext_known_opcodes[i], NULL, 0, NULL);
+                }
+                HOUT("--- NASEXT full sweep ---\n");
+                sweep_raw_all_accepted(h, "NASEXT", raw_fn, 0x0001, 0x01FF);
+                release_fn(h);
+            }
+        }
+    } else {
+        HOUT("RAW: missing raw_fn=%p init_fn=%p release_fn=%p\n",
+             (void *)raw_fn, (void *)init_fn, (void *)release_fn);
+    }
 
     /* -------- PHASE 9: live CCI round-trip (init + send + parse rc) -------- */
     HOUT("---- PHASE 9: CCI full round-trip probe ----\n");
