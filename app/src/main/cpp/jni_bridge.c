@@ -473,20 +473,26 @@ Java_com_qdiag_bandlock_diag_DiagNative_qrtrSetBandPref(
     }
     if (rc < 0) return rc;
 
-    /* Build TLVs for SET_SYSTEM_SELECTION_PREFERENCE. Same layout as over
-     * DIAG — the QMI TLV payload is transport-agnostic. */
+    /* Build TLVs for QMI NAS SET_SYSTEM_SELECTION_PREFERENCE (0x0033).
+     *
+     * Dropped TLV 0x11 ("legacy Band Preference"): that is the pre-LTE
+     * GSM/UMTS/CDMA band bitmap — stuffing LTE bits there is interpreted
+     * as garbage by the X70 modem, which replies QMI_ERR_MALFORMED_MSG.
+     *
+     * TLV 0x12 (Mode Preference, u16): set only the RAT bits we're
+     * filtering on.  Valid bits per libqmi:
+     *   b0=CDMA-1x  b1=CDMA-EVDO  b2=GSM  b3=UMTS
+     *   b4=LTE      b5=TDS-CDMA   b6=5GNR
+     * 0x00FF sets undefined bit 7 → some firmwares reject it.  We send
+     * LTE + 5GNR = 0x50 (matches what a user selecting LTE+NR bands
+     * actually wants to lock to). */
     uint8_t tlvs[128];
     size_t  to = 0;
 
-    /* TLV 0x11 legacy band pref (8 bytes, bands 1..64) */
-    tlvs[to++] = 0x11;
-    tlvs[to++] = 0x08; tlvs[to++] = 0x00;
-    for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((lteLow >> (8*i)) & 0xFF);
-
-    /* TLV 0x12 mode pref (u16 LE = 0x00FF: all RATs) */
+    /* TLV 0x12 mode pref (u16 LE): LTE (0x10) | 5GNR (0x40) = 0x50 */
     tlvs[to++] = 0x12;
     tlvs[to++] = 0x02; tlvs[to++] = 0x00;
-    tlvs[to++] = 0xFF; tlvs[to++] = 0x00;
+    tlvs[to++] = 0x50; tlvs[to++] = 0x00;
 
     /* TLV 0x1C LTE band pref ext (16 bytes, bands 1..128) */
     tlvs[to++] = 0x1C;
