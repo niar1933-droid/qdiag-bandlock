@@ -366,6 +366,179 @@ static void dump_elf_symbols(const char *path) {
     munmap(map, fsize);
 }
 
+/* ---------- Phase 7: live CCI ping ----------
+ *
+ * We actually call qmi_client_init_instance() with the service-object
+ * pointers Phase 6 discovered (nas_qmi_idl_service_object_v01,
+ * nas_ext_qmi_idl_service_object_v01). If this succeeds we KNOW the QRTR
+ * transport is up end-to-end — ~libqmi_cci returned a real handle that
+ * the modem has ack'd. We then release the handle cleanly.
+ *
+ * CCI ABI we depend on (stable since ~2013 across all MSM vendor stacks):
+ *   qmi_client_init_instance(service_obj,
+ *                            instance_id,       // uint32_t — 0 = any
+ *                            ind_cb, ind_cb_data,
+ *                            os_params,         // may be NULL
+ *                            timeout_ms,        // uint32_t
+ *                            client_handle_out)
+ *   qmi_client_release(client_handle)
+ *
+ * Return codes: 0 = OK, anything else is a QMI_* error (timeout, no service,
+ * version mismatch, …). The actual numeric space is in qmi_client_error.h;
+ * we just print the int and the caller can look it up.
+ */
+typedef int (*qmi_client_init_instance_fn)(
+    void *service_obj,
+    unsigned int instance_id,
+    void *ind_cb,
+    void *ind_cb_data,
+    void *os_params,
+    unsigned int timeout_ms,
+    void **client_handle);
+
+typedef int (*qmi_client_release_fn)(void *client_handle);
+
+static void *lookup_service_obj(const char *accessor_sym, const char *data_sym) {
+    /* Prefer calling the *_get_service_object_internal_v01() accessor when
+     * present — matches how libqmi_client_qmux uses these IDLs. Fall back
+     * to the raw data symbol (stable on X70) if the accessor doesn't exist. */
+    void (*acc)(void) = (void (*)(void)) dlsym(RTLD_DEFAULT, accessor_sym);
+    if (acc) {
+        typedef void *(*acc_fn)(void);
+        void *obj = ((acc_fn)(void *)acc)();
+        if (obj) {
+            HOUT("CCI accessor %s -> %p\n", accessor_sym, obj);
+            return obj;
+        }
+        HOUT("CCI accessor %s returned NULL\n", accessor_sym);
+    }
+    void *obj = dlsym(RTLD_DEFAULT, data_sym);
+    if (obj) {
+        HOUT("CCI data      %s -> %p\n", data_sym, obj);
+        return obj;
+    }
+    HOUT("CCI service obj for %s / %s NOT FOUND\n", accessor_sym, data_sym);
+    return NULL;
+}
+
+static void try_cci_ping(const char *tag,
+                         const char *accessor_sym,
+                         const char *data_sym) {
+    void *service_obj = lookup_service_obj(accessor_sym, data_sym);
+    if (!service_obj) return;
+
+    qmi_client_init_instance_fn init_fn =
+        (qmi_client_init_instance_fn) dlsym(RTLD_DEFAULT, "qmi_client_init_instance");
+    qmi_client_release_fn release_fn =
+        (qmi_client_release_fn) dlsym(RTLD_DEFAULT, "qmi_client_release");
+
+    if (!init_fn || !release_fn) {
+        HOUT("CCI %-6s SKIP: init=%p release=%p\n", tag, (void *)init_fn, (void *)release_fn);
+        return;
+    }
+
+    void *handle = NULL;
+    /* 5-second timeout — X70 NAS normally answers in <100ms. */
+    int rc = init_fn(service_obj,
+                     /* instance_id = */ 0,
+                     /* ind_cb      */ NULL,
+                     /* ind_data    */ NULL,
+                     /* os_params   */ NULL,
+                     /* timeout_ms  */ 5000,
+                     &handle);
+    HOUT("CCI %-6s init rc=%d handle=%p\n", tag, rc, handle);
+
+    if (rc == 0 && handle) {
+        int rr = release_fn(handle);
+        HOUT("CCI %-6s release rc=%d\n", tag, rr);
+    }
+}
+
+/* ---------- Phase 8: .rodata string scan ----------
+ *
+ * Walk the given file's ELF .rodata-ish sections (any PROGBITS with ALLOC
+ * and no EXEC) and emit every printable ASCII run (>= MIN_LEN chars) whose
+ * contents match a lock/band/cell/rf interest substring. This surfaces
+ * debug/trace strings like "NAS_LOCK_CELL_REQ" / "nas_pci_lock_req" that
+ * let us pick the right msg_id without having the IDL headers.
+ */
+#define RODATA_MIN_LEN 6
+#define RODATA_MAX_HITS 400
+static const char *g_rodata_needle[] = {
+    "LOCK", "lock", "Lock",
+    "PCI",  "pci",
+    "EARFCN", "earfcn",
+    "CELL", "cell",
+    "BAND", "band",
+    "SYS_SEL", "sys_sel", "selection_pref",
+    "REJECT", "reject",
+    "RF_",  "rf_",
+    "BAR",  "bar_",
+    "FREQ", "freq",
+    NULL,
+};
+
+static int rodata_interesting(const char *s, size_t len) {
+    if (len < RODATA_MIN_LEN) return 0;
+    for (int i = 0; g_rodata_needle[i]; i++) {
+        if (strstr(s, g_rodata_needle[i])) return 1;
+    }
+    return 0;
+}
+
+static void dump_rodata_strings(const char *path) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) { HOUT("RODATA OPEN_FAIL %s\n", path); return; }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size < (off_t)sizeof(Elf64_Ehdr)) {
+        HOUT("RODATA STAT_FAIL %s\n", path); close(fd); return;
+    }
+    size_t fsize = (size_t)st.st_size;
+    void *map = mmap(NULL, fsize, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (map == MAP_FAILED) { HOUT("RODATA MMAP_FAIL %s\n", path); return; }
+    const unsigned char *base = (const unsigned char *)map;
+    if (memcmp(base, ELFMAG, SELFMAG) != 0 || base[EI_CLASS] != ELFCLASS64) {
+        HOUT("RODATA BAD_MAGIC %s\n", path);
+        munmap(map, fsize); return;
+    }
+    const Elf64_Ehdr *eh = (const Elf64_Ehdr *)base;
+    const Elf64_Shdr *shtab = (const Elf64_Shdr *)(base + eh->e_shoff);
+
+    int hits = 0;
+    for (unsigned i = 0; i < eh->e_shnum && hits < RODATA_MAX_HITS; i++) {
+        const Elf64_Shdr *sh = &shtab[i];
+        if (sh->sh_type != SHT_PROGBITS) continue;
+        if (!(sh->sh_flags & SHF_ALLOC)) continue;
+        if (sh->sh_flags & SHF_EXECINSTR) continue;
+        if (sh->sh_offset + sh->sh_size > fsize) continue;
+        const unsigned char *data = base + sh->sh_offset;
+        size_t sz = sh->sh_size;
+        /* Walk NUL-terminated ASCII runs. */
+        size_t k = 0;
+        while (k < sz && hits < RODATA_MAX_HITS) {
+            /* Find start of printable run. */
+            while (k < sz && (data[k] < 0x20 || data[k] > 0x7E)) k++;
+            size_t start = k;
+            while (k < sz && data[k] >= 0x20 && data[k] <= 0x7E) k++;
+            if (k <= start) { k++; continue; }
+            size_t len = k - start;
+            if (len >= RODATA_MIN_LEN && len < 256) {
+                /* copy to NUL-terminated local buf to run strstr */
+                char buf[256];
+                memcpy(buf, data + start, len);
+                buf[len] = 0;
+                if (rodata_interesting(buf, len)) {
+                    HOUT("RODATA %s: %s\n", path, buf);
+                    hits++;
+                }
+            }
+        }
+    }
+    if (hits == 0) HOUT("RODATA %s NONE\n", path);
+    munmap(map, fsize);
+}
+
 static void probe(void) {
     g_log_fp = fopen("/data/local/tmp/qdiag_helper.log", "w");
     HOUT("=== qdiag_helper probe start ===\n");
@@ -420,6 +593,38 @@ static void probe(void) {
     HOUT("---- PHASE 6: ELF dynsym dump (nas/dms/wds/lock/band/service_object/sys_sel/pci) ----\n");
     for (int i = 0; i < g_lib_count; i++) {
         dump_elf_symbols(g_libs[i].path);
+    }
+
+    /* -------- PHASE 7: live CCI init/release for NAS + NAS_EXT -------- */
+    HOUT("---- PHASE 7: live CCI init_instance ----\n");
+    try_cci_ping("NAS",
+                 "nas_get_service_object_internal_v01",
+                 "nas_qmi_idl_service_object_v01");
+    try_cci_ping("NASEXT",
+                 "nas_ext_get_service_object_internal_v01",
+                 "nas_ext_qmi_idl_service_object_v01");
+    try_cci_ping("DMS",
+                 "dms_get_service_object_internal_v01",
+                 "dms_qmi_idl_service_object_v01");
+
+    /* -------- PHASE 8: .rodata string scan on lock-adjacent libs -------- */
+    HOUT("---- PHASE 8: .rodata string scan (LOCK/PCI/EARFCN/CELL/BAND/...) ----\n");
+    static const char *rodata_targets[] = {
+        "/vendor/lib64/libqmiservices.so",
+        "/vendor/lib64/libqmiextservices.so",
+        "/vendor/lib64/librilqmimiscservices.so",
+        "/vendor/lib64/libqmi_legacy.so",
+        "/vendor/lib64/libril.so",
+        "/vendor/lib64/libril-qc-radioconfig.so",
+        NULL,
+    };
+    for (int i = 0; rodata_targets[i]; i++) {
+        struct stat st;
+        if (stat(rodata_targets[i], &st) == 0) {
+            dump_rodata_strings(rodata_targets[i]);
+        } else {
+            HOUT("RODATA %s MISSING\n", rodata_targets[i]);
+        }
     }
 
     /* -------- Summary (machine-parsed by jni_bridge) -------- */
