@@ -1,12 +1,28 @@
 #include "qrtr.h"
 
+#include <android/log.h>
 #include <errno.h>
+#include <grp.h>
 #include <poll.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+#ifndef LOG_TAG
+#define LOG_TAG "qrtr"
+#endif
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+/* Android system UIDs. qrtr-ns / kernel qrtr control-plane may gate
+ * NEW_SERVER visibility on the caller's effective UID; qcrild runs as
+ * AID_RADIO(1001). Drop to radio around socket()+bind() so the kernel
+ * sees us as the radio daemon. */
+#define AID_SYSTEM 1000
+#define AID_RADIO  1001
 
 /* ---------- AF / struct fallbacks (NDK may not expose qrtr headers) ---------- */
 
@@ -62,11 +78,56 @@ int qrtr_is_open(void)    { return g_sock >= 0; }
 
 /* ---------- open / close ---------- */
 
+/* Drop effective uid/gid to AID_RADIO while keeping CAP_* (via
+ * PR_SET_KEEPCAPS). Restored by qrtr_restore_euid(). No-op when we are
+ * not running as root. */
+static void qrtr_drop_to_radio(uid_t *saved_euid, gid_t *saved_egid, int *dropped) {
+    *saved_euid = geteuid();
+    *saved_egid = getegid();
+    *dropped = 0;
+    if (*saved_euid != 0) return;
+    prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0);
+    gid_t groups[] = { AID_RADIO, AID_SYSTEM };
+    if (setgroups(2, groups) < 0) {
+        LOGE("qrtr setgroups failed: %d (%s)", errno, strerror(errno));
+    }
+    if (setegid(AID_RADIO) < 0) {
+        LOGE("qrtr setegid(radio) failed: %d (%s)", errno, strerror(errno));
+        prctl(PR_SET_KEEPCAPS, 0, 0, 0, 0);
+        return;
+    }
+    if (seteuid(AID_RADIO) < 0) {
+        LOGE("qrtr seteuid(radio) failed: %d (%s)", errno, strerror(errno));
+        setegid(*saved_egid);
+        prctl(PR_SET_KEEPCAPS, 0, 0, 0, 0);
+        return;
+    }
+    *dropped = 1;
+    LOGI("qrtr: dropped to radio (euid=%d egid=%d)", geteuid(), getegid());
+}
+
+static void qrtr_restore_euid(uid_t saved_euid, gid_t saved_egid, int dropped) {
+    if (!dropped) return;
+    if (seteuid(saved_euid) < 0) LOGE("qrtr seteuid restore failed: %d (%s)", errno, strerror(errno));
+    if (setegid(saved_egid) < 0) LOGE("qrtr setegid restore failed: %d (%s)", errno, strerror(errno));
+    prctl(PR_SET_KEEPCAPS, 0, 0, 0, 0);
+}
+
 int qrtr_open(void) {
     if (g_sock >= 0) return QRTR_RC_OK;
 
+    /* Drop to AID_RADIO around socket()+bind() — kernel qrtr ns may gate
+     * NEW_SERVER announcements (modem QMI services) by peer UID, filtering
+     * them out for non-radio callers. */
+    uid_t seuid = 0; gid_t segid = 0; int dropped = 0;
+    qrtr_drop_to_radio(&seuid, &segid, &dropped);
+
     g_sock = socket(AF_QIPCRTR, SOCK_DGRAM, 0);
-    if (g_sock < 0) { save_errno(); return QRTR_RC_SOCKET_FAIL; }
+    if (g_sock < 0) {
+        save_errno();
+        qrtr_restore_euid(seuid, segid, dropped);
+        return QRTR_RC_SOCKET_FAIL;
+    }
 
     /* Some kernels (HyperOS on Poco F6) reject bind(sq_node=0) with EINVAL
      * because the socket is already pre-bound to ipc->us.sq_node != 0.
@@ -113,6 +174,14 @@ int qrtr_open(void) {
     ctrl.sq_port   = QRTR_PORT_CTRL;
     (void)sendto(g_sock, &hello, sizeof(hello), 0,
                  (struct sockaddr *)&ctrl, sizeof(ctrl));
+
+    /* Keep the socket open under the original euid; the kernel remembers
+     * the creating credentials on the struct sock, so qrtr-ns treats us
+     * as the radio daemon for the lifetime of this fd. Restore process
+     * euid so subsequent non-qrtr syscalls (file I/O, other sockets) run
+     * with full root privileges. */
+    qrtr_restore_euid(seuid, segid, dropped);
+    LOGI("qrtr: open ok my_node=%u my_port=%u", g_my_node, g_my_port);
 
     return QRTR_RC_OK;
 }
