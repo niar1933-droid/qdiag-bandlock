@@ -140,9 +140,50 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         rc == -1006 -> "request builder failed"
         rc in -1102..-1002 -> "write failed errno=${-1002 - rc} (${errnoName(-1002 - rc)})"
         rc in -1103..-1003 -> "read failed errno=${-1003 - rc} (${errnoName(-1003 - rc)})"
-        rc and 0xFFFF0000.toInt() == 0x10000 -> "QMI error 0x${(rc and 0xFFFF).toString(16).padStart(4, '0')}"
+        rc and 0xFFFF0000.toInt() == 0x10000 -> {
+            val qerr = rc and 0xFFFF
+            val name = qmiErrName(qerr)
+            "QMI error 0x${qerr.toString(16).padStart(4, '0')} ($name)"
+        }
         rc in -2010..-2001 -> "QMI parse error (rc=${rc + 2000})"
         else -> "rc=0x${rc.toString(16)}"
+    }
+
+    private fun qmiErrName(e: Int): String = when (e) {
+        0x0000 -> "NONE"
+        0x0001 -> "MALFORMED_MSG"
+        0x0002 -> "NO_MEMORY"
+        0x0003 -> "INTERNAL — band not supported by modem?"
+        0x0004 -> "ABORTED"
+        0x0005 -> "CLIENT_IDS_EXHAUSTED"
+        0x0006 -> "UNABORTABLE_TRANSACTION"
+        0x0007 -> "INVALID_CLIENT_ID"
+        0x0008 -> "NO_THRESHOLDS"
+        0x0009 -> "INVALID_HANDLE"
+        0x000A -> "INVALID_PROFILE"
+        0x000B -> "INVALID_PINID"
+        0x000C -> "INCORRECT_PIN"
+        0x000D -> "NO_NETWORK_FOUND"
+        0x000E -> "CALL_FAILED"
+        0x000F -> "OUT_OF_CALL"
+        0x0010 -> "NOT_PROVISIONED"
+        0x0011 -> "MISSING_ARG"
+        0x0013 -> "ARG_TOO_LONG"
+        0x0016 -> "INVALID_TX_ID"
+        0x0017 -> "DEVICE_IN_USE"
+        0x0019 -> "OP_NETWORK_UNSUPPORTED"
+        0x001A -> "OP_DEVICE_UNSUPPORTED"
+        0x001B -> "NO_EFFECT"
+        0x001D -> "NO_FREE_PROFILE"
+        0x001E -> "INVALID_PDP_TYPE"
+        0x001F -> "INVALID_TECHNOLOGY_PREFERENCE"
+        0x0025 -> "INVALID_ARG"
+        0x0026 -> "INVALID_INDEX"
+        0x0027 -> "NO_ENTRY"
+        0x0033 -> "NOT_SUPPORTED"
+        0x0034 -> "NO_SUBSCRIPTION"
+        0x005A -> "UNSUPPORTED_BAND_LTE_NR"
+        else -> "UNKNOWN"
     }
 
     private fun errnoName(e: Int): String = when (e) {
