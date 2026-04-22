@@ -138,5 +138,5 @@ interface IDiagRoot {
     /** Vendor QMI library probe (NSG path). dlopen /vendor/lib64/libqmi_client_qmux.so
      *  + deps, resolve classic Qualcomm QMI entrypoints. Returns 0 if library
      *  cannot be loaded at all; else 0x10000|symbolMask. See DiagNative kdoc. */
-    int qmiVendorProbe();
+    int qmiVendorProbe(String destDir);
 }

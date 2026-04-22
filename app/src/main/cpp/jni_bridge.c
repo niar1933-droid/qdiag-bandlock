@@ -1137,25 +1137,82 @@ static void *try_dlopen(const char *path) {
     return NULL;
 }
 
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <unistd.h>
+
+/* Root-service copy of a vendor library into a path the app linker namespace
+ * allows (our app's files dir). Returns 0 on success. */
+static int copy_file(const char *src, const char *dst) {
+    int sfd = open(src, O_RDONLY | O_CLOEXEC);
+    if (sfd < 0) { LOGE("vendor-qmi: cp: open src FAIL %s: %s", src, strerror(errno)); return -1; }
+    int dfd = open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (dfd < 0) { LOGE("vendor-qmi: cp: open dst FAIL %s: %s", dst, strerror(errno)); close(sfd); return -2; }
+    char buf[64 * 1024];
+    ssize_t n; off_t total = 0;
+    while ((n = read(sfd, buf, sizeof(buf))) > 0) {
+        ssize_t w = 0;
+        while (w < n) {
+            ssize_t ww = write(dfd, buf + w, n - w);
+            if (ww < 0) { close(sfd); close(dfd); return -3; }
+            w += ww;
+        }
+        total += n;
+    }
+    fchmod(dfd, 0644);
+    close(sfd);
+    close(dfd);
+    LOGI("vendor-qmi: cp %s -> %s (%lld B)", src, dst, (long long)total);
+    return 0;
+}
+
 JNIEXPORT jint JNICALL
 Java_com_qdiag_bandlock_diag_DiagNative_qmiVendorProbe(
-        JNIEnv *env, jclass clz) {
-    (void)env; (void)clz;
+        JNIEnv *env, jclass clz, jstring jDestDir) {
+    (void)clz;
 
-    /* Pre-load common dependencies first so symbol resolution order is right. */
-    static const char *deps[] = {
-        "/vendor/lib64/libqmi_cci.so",
-        "/vendor/lib64/libqmi_common_so.so",
-        "/vendor/lib64/libqmi_encdec.so",
-        "/vendor/lib64/libqmi_csi.so",
-        "/vendor/lib64/libqmi_client_helper.so",
+    const char *destDir = (*env)->GetStringUTFChars(env, jDestDir, NULL);
+    if (!destDir) return 0;
+    LOGI("vendor-qmi: dest dir = %s", destDir);
+
+    /* Make sure dir exists (root may have to create it). */
+    mkdir(destDir, 0755);
+    chmod(destDir, 0755);
+
+    /* Libraries to stage (in dep order for load). */
+    static const char *names[] = {
+        "libqmi_cci.so",
+        "libqmi_common_so.so",
+        "libqmi_encdec.so",
+        "libqmi_csi.so",
+        "libqmi_client_helper.so",
+        "libqmi_client_qmux.so",
         NULL,
     };
-    for (int i = 0; deps[i]; i++) (void)try_dlopen(deps[i]);
 
-    void *h = try_dlopen("/vendor/lib64/libqmi_client_qmux.so");
+    char src[256], dst[512];
+    for (int i = 0; names[i]; i++) {
+        snprintf(src, sizeof(src), "/vendor/lib64/%s", names[i]);
+        snprintf(dst, sizeof(dst), "%s/%s", destDir, names[i]);
+        if (copy_file(src, dst) != 0) {
+            LOGE("vendor-qmi: stage FAIL %s", names[i]);
+        }
+    }
+
+    /* dlopen prerequisites, then main library, each from the staged path. */
+    for (int i = 0; names[i] && names[i+1]; i++) {
+        snprintf(dst, sizeof(dst), "%s/%s", destDir, names[i]);
+        (void)try_dlopen(dst);
+    }
+
+    snprintf(dst, sizeof(dst), "%s/libqmi_client_qmux.so", destDir);
+    void *h = try_dlopen(dst);
+
+    (*env)->ReleaseStringUTFChars(env, jDestDir, destDir);
+
     if (!h) {
-        return 0;  /* dlopen refused — namespace / selinux / missing sym */
+        return 0;  /* dlopen refused — linker-namespace refused staged path too */
     }
 
     /* Symbols NSG uses (from RE of libqtrun_arch_jni.so). */

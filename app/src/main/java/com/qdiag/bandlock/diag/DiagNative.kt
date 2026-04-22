@@ -130,7 +130,7 @@ object DiagNative {
      *      bit5: qmi_linux_get_internal_use_port
      *      bit6: qmi_linux_get_conn_id_by_name
      */
-    @JvmStatic external fun qmiVendorProbe(): Int
+    @JvmStatic external fun qmiVendorProbe(destDir: String): Int
 
     /* ---------- DIAG sniffer (background HDLC-decoded frame capture) ---------- */
 

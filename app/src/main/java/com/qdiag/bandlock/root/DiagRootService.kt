@@ -69,7 +69,7 @@ class DiagRootService : RootService() {
         override fun qmuxProbeCellLock(earfcn: Int, pci: Int): Int =
             DiagNative.qmuxProbeCellLock(earfcn, pci)
 
-        override fun qmiVendorProbe(): Int = DiagNative.qmiVendorProbe()
+        override fun qmiVendorProbe(destDir: String): Int = DiagNative.qmiVendorProbe(destDir)
     }
 
     companion object { private const val TAG = "DiagRootService" }
