@@ -94,7 +94,9 @@ fun MainScreen(vm: MainViewModel) {
     val chromeDivider   = if (glass) GlassColors.DividerSoft else NsgColors.Divider
     val chromeBgColor   = if (glass) Color.Transparent else NsgColors.Background
     val chromeSurface   = if (glass) Color.Transparent else NsgColors.Surface
-    val drawerContainer = if (glass) GlassColors.PanelFillStrong else NsgColors.Surface
+    // In Glass mode the drawer sheet must be nearly opaque — otherwise the main
+    // screen content bleeds through and all drawer labels become unreadable.
+    val drawerContainer = if (glass) Color(0xFF0C1120) else NsgColors.Surface
 
     val ui: @Composable () -> Unit = {
         ModalNavigationDrawer(
@@ -261,7 +263,12 @@ private fun RatPagerSection(state: UiState, modifier: Modifier = Modifier) {
         ) { page ->
             val rat = RAT_ORDER[page]
             val snap = state.snapshots[rat] ?: RatSnapshot(rat, available = false)
-            Column(Modifier.verticalScroll(rememberScrollState())) {
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.Top,
+            ) {
                 RatPage(snap)
             }
         }
