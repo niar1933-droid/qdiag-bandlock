@@ -421,33 +421,70 @@ int qrtr_transact(uint32_t node, uint32_t port,
     dst.sq_node   = node;
     dst.sq_port   = port;
 
+    LOGI("qrtr_transact tx node=%u port=0x%X len=%zu first=%02X %02X %02X %02X %02X %02X %02X",
+         node, port, tx_len,
+         tx_len>0?tx[0]:0, tx_len>1?tx[1]:0, tx_len>2?tx[2]:0,
+         tx_len>3?tx[3]:0, tx_len>4?tx[4]:0, tx_len>5?tx[5]:0,
+         tx_len>6?tx[6]:0);
+
     ssize_t n = sendto(g_sock, tx, tx_len, 0,
                        (struct sockaddr *)&dst, sizeof(dst));
-    if (n < 0) { save_errno(); return QRTR_RC_SEND_FAIL; }
+    if (n < 0) {
+        int e = errno; save_errno();
+        LOGE("qrtr_transact sendto failed errno=%d (%s)", e, strerror(e));
+        return QRTR_RC_SEND_FAIL;
+    }
 
     struct pollfd pfd = { .fd = g_sock, .events = POLLIN };
-    int elapsed = 0;
-    while (elapsed < timeout_ms) {
-        int poll_ms = timeout_ms - elapsed;
+    long long t0 = now_ms();
+    int total_pkts = 0, ctrl_pkts = 0, other_pkts = 0;
+    for (;;) {
+        long long elapsed = now_ms() - t0;
+        if (elapsed >= timeout_ms) break;
+        int poll_ms = (int)(timeout_ms - elapsed);
         if (poll_ms > 1000) poll_ms = 1000;
         int pr = poll(&pfd, 1, poll_ms);
-        if (pr < 0) { save_errno(); return QRTR_RC_RECV_FAIL; }
-        elapsed += poll_ms;
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            save_errno();
+            return QRTR_RC_RECV_FAIL;
+        }
         if (pr == 0) continue;
 
-        struct sockaddr_qrtr_compat src = { 0 };
-        socklen_t sl = sizeof(src);
-        ssize_t m = recvfrom(g_sock, rx, rx_cap, 0,
-                             (struct sockaddr *)&src, &sl);
-        if (m < 0) { save_errno(); return QRTR_RC_RECV_FAIL; }
-        if (src.sq_port == QRTR_PORT_CTRL) {
-            /* Control advertisement; not our reply — keep waiting. */
-            continue;
-        }
-        if (src.sq_node == node && src.sq_port == port) {
-            return (int)m;
+        /* Drain every pending packet this wakeup; match client-side. */
+        for (;;) {
+            struct sockaddr_qrtr_compat src = { 0 };
+            socklen_t sl = sizeof(src);
+            uint8_t tmp[2048];
+            uint8_t *rxp = rx; size_t rxp_cap = rx_cap;
+            /* We don't know yet if this packet is our reply. Peek into tmp;
+             * if it matches, copy to caller's rx. */
+            ssize_t m = recvfrom(g_sock, tmp, sizeof(tmp), MSG_DONTWAIT,
+                                 (struct sockaddr *)&src, &sl);
+            if (m < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                if (errno == EINTR) continue;
+                save_errno();
+                return QRTR_RC_RECV_FAIL;
+            }
+            total_pkts++;
+            if (src.sq_port == QRTR_PORT_CTRL) { ctrl_pkts++; continue; }
+            if (src.sq_node == node && src.sq_port == port) {
+                LOGI("qrtr_transact RX match node=%u port=0x%X len=%zd "
+                     "(after %d pkts, %d ctrl, %d other)",
+                     src.sq_node, src.sq_port, m,
+                     total_pkts, ctrl_pkts, other_pkts);
+                if ((size_t)m > rxp_cap) m = (ssize_t)rxp_cap;
+                memcpy(rxp, tmp, (size_t)m);
+                return (int)m;
+            }
+            other_pkts++;
+            LOGI("qrtr_transact RX unrelated node=%u port=0x%X len=%zd",
+                 src.sq_node, src.sq_port, m);
         }
     }
+    LOGE("qrtr_transact timeout node=%u port=0x%X (%d total pkts: %d ctrl, %d other)",
+         node, port, total_pkts, ctrl_pkts, other_pkts);
     return QRTR_RC_TIMEOUT;
 }
 
