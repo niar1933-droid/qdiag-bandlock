@@ -12,6 +12,7 @@ import android.telephony.CellInfoNr
 import android.telephony.CellInfoWcdma
 import android.telephony.CellSignalStrengthLte
 import android.telephony.CellSignalStrengthNr
+import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -62,9 +63,46 @@ class CellObserver(private val context: Context) {
     private val _snapshots = MutableStateFlow<Map<Rat, RatSnapshot>>(emptyMap())
     val snapshots: StateFlow<Map<Rat, RatSnapshot>> = _snapshots.asStateFlow()
 
+    private var pushCallback: TelephonyCallback? = null
+
     fun hasLocationPermission(): Boolean =
         ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
             PackageManager.PERMISSION_GRANTED
+
+    /**
+     * Subscribe to push updates from TelephonyRegistry. On API 31+ we use
+     * `TelephonyCallback.CellInfoListener` which fires every time the modem
+     * reports a new CellInfo batch — this is ~real-time (cadence driven by
+     * the modem itself, typically 100–500 ms). Caller must still invoke
+     * `refresh()` on a fallback timer in case the modem goes quiet.
+     */
+    @SuppressLint("MissingPermission")
+    fun startPushUpdates() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        if (pushCallback != null) return
+        if (!hasLocationPermission()) return
+        val cb = object : TelephonyCallback(), TelephonyCallback.CellInfoListener {
+            override fun onCellInfoChanged(cellInfo: MutableList<CellInfo>) {
+                if (hasLocationPermission()) publish(cellInfo)
+            }
+        }
+        try {
+            tm.registerTelephonyCallback(context.mainExecutor, cb)
+            pushCallback = cb
+        } catch (_: SecurityException) {
+            /* missing permission — refresh() polling will still work */
+        }
+    }
+
+    fun stopPushUpdates() {
+        val cb = pushCallback ?: return
+        try {
+            tm.unregisterTelephonyCallback(cb)
+        } catch (_: Exception) {
+            /* ignore */
+        }
+        pushCallback = null
+    }
 
     @SuppressLint("MissingPermission")
     private fun publish(all: List<CellInfo>) {

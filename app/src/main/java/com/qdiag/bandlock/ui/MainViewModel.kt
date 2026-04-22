@@ -226,13 +226,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 if (_ui.value.snifferRunning) pollSniffer()
             }
         }
-        /* Periodically refresh cell / RSSI snapshot so the UI doesn't freeze. */
+        /*
+         * Real-time telemetry: subscribe to push updates from
+         * TelephonyRegistry (modem-driven, ~100-500ms cadence), plus a
+         * fast fallback poll for phones where the push channel goes
+         * quiet or the OS throttles callbacks.
+         */
+        observer.startPushUpdates()
         viewModelScope.launch {
             while (isActive) {
                 observer.refresh()
-                delay(2000)
+                delay(400)
             }
         }
+    }
+
+    override fun onCleared() {
+        observer.stopPushUpdates()
+        super.onCleared()
     }
 
     fun bindRootService() {
