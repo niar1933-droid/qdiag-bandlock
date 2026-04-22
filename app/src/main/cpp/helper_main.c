@@ -14,10 +14,21 @@
 #include <dlfcn.h>
 #include <dirent.h>
 
+/* Dual-destination printf: stdout (seen by jni_bridge popen) AND a log file
+ * the user can cat from the shell if logcat buffer rolls over. */
+static FILE *g_log_fp = NULL;
+
+#define HOUT(...) do { \
+    fprintf(stdout, __VA_ARGS__); fflush(stdout); \
+    if (g_log_fp) { fprintf(g_log_fp, __VA_ARGS__); fflush(g_log_fp); } \
+} while (0)
+
 /* Opens each lib with RTLD_NOW|RTLD_GLOBAL. Stores handle for later dlsym(). */
 typedef struct { const char *path; void *h; } lib_t;
 
 static void probe(void) {
+    g_log_fp = fopen("/data/local/tmp/qdiag_helper.log", "w");
+    HOUT("=== qdiag_helper probe start ===\n");
     lib_t libs[] = {
         { "/vendor/lib64/libcutils.so",            NULL },
         { "/vendor/lib64/libdiag.so",              NULL },
@@ -36,10 +47,8 @@ static void probe(void) {
     for (int i = 0; libs[i].path; i++) {
         libs[i].h = dlopen(libs[i].path, RTLD_NOW | RTLD_GLOBAL);
         const char *err = libs[i].h ? "ok" : dlerror();
-        fprintf(stdout, "DEP %s %s\n", libs[i].h ? "OK" : "FAIL", libs[i].path);
-        if (!libs[i].h) fprintf(stdout, "DEP_ERR %s: %s\n",
-                                libs[i].path, err ? err : "(null)");
-        fflush(stdout);
+        HOUT("DEP %s %s\n", libs[i].h ? "OK" : "FAIL", libs[i].path);
+        if (!libs[i].h) HOUT("DEP_ERR %s: %s\n", libs[i].path, err ? err : "(null)");
     }
 
     /* Wide symbol search: MSM QMI CCI + qmuxd variants + NAS service objs. */
@@ -88,16 +97,18 @@ static void probe(void) {
         }
         if (found_at) {
             resolved++;
-            fprintf(stdout, "SYM OK %-46s -> %p @ %s\n", syms[s], found_at, found_path);
+            HOUT("SYM OK %-46s -> %p @ %s\n", syms[s], found_at, found_path);
         } else {
-            fprintf(stdout, "SYM MISS %s\n", syms[s]);
+            HOUT("SYM MISS %s\n", syms[s]);
         }
     }
 
-    fprintf(stdout, "FOUND(initial) %d/%d\n", resolved, total);
+    HOUT("FOUND(initial) %d/%d\n", resolved, total);
 
-    /* Scan /vendor/lib64/ for service-object libs (nas/dms/modem/ril/qmi),
-     * dlopen each, and report which one exports *_get_service_object_v01. */
+    /* Scan /vendor/lib64/ for QMI IDL service-object libs only. Qualcomm's
+     * IDL convention is `lib<service>_<iface>_v01.so` or `libnas_api.so`
+     * etc. Avoid the noisy RIL libs which self-register message dispatchers
+     * in their ctors. */
     DIR *d = opendir("/vendor/lib64");
     if (d) {
         struct dirent *e;
@@ -106,10 +117,14 @@ static void probe(void) {
             if (n < 7) continue;
             if (strncmp(e->d_name, "lib", 3)) continue;
             if (strcmp(e->d_name + n - 3, ".so")) continue;
-            static const char *kw[] = { "nas", "dms", "modem", "qmi", "qcril", "ril", "wds" };
             int match = 0;
-            for (size_t k = 0; k < sizeof(kw)/sizeof(*kw); k++)
-                if (strstr(e->d_name, kw[k])) { match = 1; break; }
+            /* QMI IDL libs: name ending in _v01.so */
+            if (n > 7 && strcmp(e->d_name + n - 7, "_v01.so") == 0) match = 1;
+            /* Specific service API libs */
+            else if (strncmp(e->d_name, "libnas_",   7) == 0) match = 1;
+            else if (strncmp(e->d_name, "libdms_",   7) == 0) match = 1;
+            else if (strncmp(e->d_name, "libwds_",   7) == 0) match = 1;
+            else if (strncmp(e->d_name, "libmodem_", 9) == 0) match = 1;
             if (!match) continue;
             char p[512];
             snprintf(p, sizeof(p), "/vendor/lib64/%s", e->d_name);
@@ -121,11 +136,10 @@ static void probe(void) {
             void *hh = dlopen(p, RTLD_NOW | RTLD_GLOBAL);
             if (!hh) {
                 const char *err = dlerror();
-                fprintf(stdout, "SCAN FAIL %s: %s\n", p, err ? err : "(null)");
-                fflush(stdout);
+                HOUT("SCAN FAIL %s: %s\n", p, err ? err : "(null)");
                 continue;
             }
-            fprintf(stdout, "SCAN OK %s\n", p);
+            HOUT("SCAN OK %s\n", p);
             static const char *ssyms[] = {
                 "nas_get_service_object_v01",
                 "dms_get_service_object_v01",
@@ -135,19 +149,29 @@ static void probe(void) {
             for (size_t s = 0; s < sizeof(ssyms)/sizeof(*ssyms); s++) {
                 void *sp = dlsym(hh, ssyms[s]);
                 if (sp) {
-                    fprintf(stdout, "SERVICE_OBJ %-32s -> %p @ %s\n",
-                            ssyms[s], sp, p);
+                    HOUT("SERVICE_OBJ %-32s -> %p @ %s\n", ssyms[s], sp, p);
                     if (strcmp(ssyms[s], "nas_get_service_object_v01") == 0) resolved++;
                 }
             }
-            fflush(stdout);
         }
         closedir(d);
     } else {
-        fprintf(stdout, "SCAN_ERR opendir(/vendor/lib64): %s\n", strerror(errno));
+        HOUT("SCAN_ERR opendir(/vendor/lib64): %s\n", strerror(errno));
     }
 
-    fprintf(stdout, "FOUND %d/%d\n", resolved, total);
+    /* Also re-scan RTLD_DEFAULT for the service-object symbols; some libs
+     * pull them in transitively even without an explicit dlopen. */
+    static const char *ssyms2[] = {
+        "nas_get_service_object_v01",
+        "dms_get_service_object_v01",
+        "wds_get_service_object_v01",
+    };
+    for (size_t s = 0; s < sizeof(ssyms2)/sizeof(*ssyms2); s++) {
+        void *p = dlsym(RTLD_DEFAULT, ssyms2[s]);
+        if (p) HOUT("SERVICE_OBJ_RTLD %-32s -> %p\n", ssyms2[s], p);
+    }
+
+    HOUT("FOUND %d/%d\n", resolved, total);
     /* Legacy MASK line kept so jni_bridge parser still captures something non-zero
      * when we have at least one canonical client symbol. Bit layout = first 16 syms. */
     int mask = 0;
@@ -155,9 +179,10 @@ static void probe(void) {
         void *p = dlsym(RTLD_DEFAULT, syms[s]);
         if (p) mask |= (1 << s);
     }
-    fprintf(stdout, "MAIN OK (symbol scan done)\n");
-    fprintf(stdout, "MASK 0x%04X %d/%d\n", mask, resolved, total);
-    fflush(stdout);
+    HOUT("MAIN OK (symbol scan done)\n");
+    HOUT("MASK 0x%04X %d/%d\n", mask, resolved, total);
+    HOUT("=== qdiag_helper probe end ===\n");
+    if (g_log_fp) { fclose(g_log_fp); g_log_fp = NULL; }
 }
 
 int main(int argc, char **argv) {
