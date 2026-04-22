@@ -473,69 +473,96 @@ Java_com_qdiag_bandlock_diag_DiagNative_qrtrSetBandPref(
     }
     if (rc < 0) return rc;
 
-    /* Build TLVs for QMI NAS SET_SYSTEM_SELECTION_PREFERENCE (0x0033).
+    /* PROBE MODE.  We do not yet know the authoritative TLV IDs for
+     * SET_SYSTEM_SELECTION_PREFERENCE on the X70 modem in this firmware.
+     * Previous attempts returned QMI_ERR_MALFORMED_MSG (0x0001) for
+     * multiple plausible TLV IDs.  Rather than guess again, we send
+     * several small candidate requests and log each modem reply.  The
+     * first variant that comes back with result==SUCCESS (or any error
+     * other than MALFORMED) identifies the correct TLV IDs.
      *
-     * Per libqmi nas.json:
-     *   0x11 Mode Preference            u16   (2 bytes)
-     *   0x12 Band Preference            u64   (8 bytes, legacy GSM/UMTS)
-     *   0x15 LTE Band Preference        u64   (8 bytes, deprecated)
-     *   0x1C LTE Band Preference Ext    u64+u64 (16 bytes, bands 1..128)
-     *   0x24 NR5G SA Band Preference    u64+u64 (16 bytes)
-     *   0x25 NR5G NSA Band Preference   u64+u64 (16 bytes)
-     *
-     * Previous build had 0x11 and 0x12 swapped (sending 2 bytes to 0x12
-     * which expects 8 -> MALFORMED_MSG).  This version fixes that and
-     * also picks Mode Preference based on what the user actually
-     * selected, and only emits NR5G TLVs when NR bands were chosen. */
-    uint8_t tlvs[128];
-    size_t  to = 0;
+     * Every variant is sent as an independent QMI transaction (same
+     * NAS client, different txid).  Results are surfaced via logcat
+     * tag "qrtr" and the final return value encodes the LAST variant
+     * attempted (so Snackbar still shows something). */
 
-    int have_lte = (lteLow != 0) || (lteHigh != 0);
-    int have_nr  = (nrLow  != 0) || (nrHigh  != 0);
-    uint16_t mode_pref = 0;
-    if (have_lte) mode_pref |= 0x10;  /* b4 LTE */
-    if (have_nr)  mode_pref |= 0x40;  /* b6 5GNR */
-    if (!mode_pref) mode_pref = 0x10; /* fallback LTE */
+    int have_nr = (nrLow != 0) || (nrHigh != 0); (void)have_nr;
+    uint16_t mode_pref = 0x0010;              /* LTE bit only, minimal */
 
-    /* TLV 0x11 Mode Preference (u16 LE) */
-    tlvs[to++] = 0x11;
-    tlvs[to++] = 0x02; tlvs[to++] = 0x00;
-    tlvs[to++] = (uint8_t)(mode_pref & 0xFF);
-    tlvs[to++] = (uint8_t)((mode_pref >> 8) & 0xFF);
+    typedef struct {
+        const char *name;
+        uint8_t tlvs[64];
+        size_t  tlvs_len;
+    } variant_t;
 
-    /* TLV 0x1C LTE Band Preference Ext (16 bytes, bands 1..128) */
-    tlvs[to++] = 0x1C;
-    tlvs[to++] = 0x10; tlvs[to++] = 0x00;
-    for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((lteLow  >> (8*i)) & 0xFF);
-    for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((lteHigh >> (8*i)) & 0xFF);
+    variant_t V[8];
+    int nv = 0;
 
-    if (have_nr) {
-        /* TLV 0x24 NR5G SA band pref (16 bytes) */
-        tlvs[to++] = 0x24;
-        tlvs[to++] = 0x10; tlvs[to++] = 0x00;
-        for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((nrLow  >> (8*i)) & 0xFF);
-        for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((nrHigh >> (8*i)) & 0xFF);
+    /* Helper macros to build into variant.tlvs[] */
+    #define VSTART() uint8_t *t = V[nv].tlvs; size_t o = 0
+    #define VPUT8(x)  t[o++] = (uint8_t)(x)
+    #define VPUT16(x) t[o++] = (uint8_t)((x) & 0xFF); t[o++] = (uint8_t)(((x) >> 8) & 0xFF)
+    #define VPUTTLV(id, len) t[o++] = (uint8_t)(id); t[o++] = (uint8_t)((len) & 0xFF); t[o++] = (uint8_t)(((len) >> 8) & 0xFF)
+    #define VPUT_U64(v) do { for (int i = 0; i < 8; i++) t[o++] = (uint8_t)(((v) >> (8*i)) & 0xFF); } while (0)
+    #define VEND(nm) V[nv].name = nm; V[nv].tlvs_len = o; nv++
 
-        /* TLV 0x25 NR5G NSA band pref (16 bytes) */
-        tlvs[to++] = 0x25;
-        tlvs[to++] = 0x10; tlvs[to++] = 0x00;
-        for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((nrLow  >> (8*i)) & 0xFF);
-        for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((nrHigh >> (8*i)) & 0xFF);
+    /* Variant 0: MODE_PREF=0x11 u16 + LTE_EXT=0x1C u128 */
+    { VSTART(); VPUTTLV(0x11, 2); VPUT16(mode_pref);
+      VPUTTLV(0x1C, 16); VPUT_U64(lteLow); VPUT_U64(lteHigh); VEND("mode11+lte1C"); }
+    /* Variant 1: MODE_PREF=0x11 + LEGACY_LTE=0x15 u64 */
+    { VSTART(); VPUTTLV(0x11, 2); VPUT16(mode_pref);
+      VPUTTLV(0x15, 8); VPUT_U64(lteLow); VEND("mode11+lte15"); }
+    /* Variant 2: MODE_PREF=0x12 + BAND_PREF=0x11 u64 (old qmi_nas.c layout) */
+    { VSTART(); VPUTTLV(0x11, 8); VPUT_U64(lteLow);
+      VPUTTLV(0x12, 2); VPUT16(mode_pref); VEND("legacy11+mode12"); }
+    /* Variant 3: mode only (0x11 u16) */
+    { VSTART(); VPUTTLV(0x11, 2); VPUT16(mode_pref); VEND("mode11-only"); }
+    /* Variant 4: mode only (0x12 u16) */
+    { VSTART(); VPUTTLV(0x12, 2); VPUT16(mode_pref); VEND("mode12-only"); }
+    /* Variant 5: LTE ext only (0x1C u128) */
+    { VSTART(); VPUTTLV(0x1C, 16); VPUT_U64(lteLow); VPUT_U64(lteHigh); VEND("lte1C-only"); }
+    /* Variant 6: legacy LTE only (0x15 u64) */
+    { VSTART(); VPUTTLV(0x15, 8); VPUT_U64(lteLow); VEND("lte15-only"); }
+    /* Variant 7: empty (no TLVs — should succeed as a no-op if framing is OK) */
+    { VSTART(); (void)t; (void)o; VEND("empty"); }
+
+    #undef VSTART
+    #undef VPUT8
+    #undef VPUT16
+    #undef VPUTTLV
+    #undef VPUT_U64
+    #undef VEND
+
+    int last_encoded = (int)(0x10000 | 0x0001);
+    for (int i = 0; i < nv; i++) {
+        uint8_t req[256];
+        size_t reqLen = qrtr_build_qmi_request(req, sizeof(req), 0x0033,
+                                               V[i].tlvs, V[i].tlvs_len);
+        if (!reqLen) { LOGE("probe[%d] %s build fail", i, V[i].name); continue; }
+
+        uint8_t rxb[2048];
+        int m = qrtr_transact(node, port, req, reqLen, rxb, sizeof(rxb), 3000);
+        if (m < 0) {
+            LOGE("probe[%d] %s transact rc=%d", i, V[i].name, m);
+            last_encoded = m;
+            continue;
+        }
+
+        uint16_t mid = 0, result = 0xFFFF, err = 0xFFFF;
+        int prc = qrtr_parse_qmi_response(rxb, (size_t)m, &mid, &result, &err);
+        if (prc < 0) {
+            LOGE("probe[%d] %s bad-frame len=%d", i, V[i].name, m);
+            last_encoded = QDIAG_RC_BAD_FRAME;
+            continue;
+        }
+        LOGI("probe[%d] %s result=%u err=0x%04X (mid=0x%04X)",
+             i, V[i].name, result, err, mid);
+        last_encoded = (result == 0) ? 0 : (int)(0x10000 | err);
+        /* Stop at first success or first non-MALFORMED error (signal). */
+        if (result == 0) return 0;
+        if (err != 0x0001) return last_encoded;
     }
-
-    uint8_t req[256];
-    size_t reqLen = qrtr_build_qmi_request(req, sizeof(req), 0x0033, tlvs, to);
-    if (!reqLen) return QDIAG_RC_BUILD_FAIL;
-
-    uint8_t rx[2048];
-    int n = qrtr_transact(node, port, req, reqLen, rx, sizeof(rx), 5000);
-    if (n < 0) return n;
-
-    uint16_t mid = 0, result = 0xFFFF, err = 0xFFFF;
-    int prc = qrtr_parse_qmi_response(rx, (size_t)n, &mid, &result, &err);
-    if (prc < 0) return QDIAG_RC_BAD_FRAME;
-    if (result != 0) return (jint)(0x10000 | err);
-    return 0;
+    return last_encoded;
 }
 
 /* ========================================================================== */
