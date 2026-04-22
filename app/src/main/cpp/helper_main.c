@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <dlfcn.h>
+#include <dirent.h>
 
 /* Opens each lib with RTLD_NOW|RTLD_GLOBAL. Stores handle for later dlsym(). */
 typedef struct { const char *path; void *h; } lib_t;
@@ -91,6 +92,59 @@ static void probe(void) {
         } else {
             fprintf(stdout, "SYM MISS %s\n", syms[s]);
         }
+    }
+
+    fprintf(stdout, "FOUND(initial) %d/%d\n", resolved, total);
+
+    /* Scan /vendor/lib64/ for service-object libs (nas/dms/modem/ril/qmi),
+     * dlopen each, and report which one exports *_get_service_object_v01. */
+    DIR *d = opendir("/vendor/lib64");
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            size_t n = strlen(e->d_name);
+            if (n < 7) continue;
+            if (strncmp(e->d_name, "lib", 3)) continue;
+            if (strcmp(e->d_name + n - 3, ".so")) continue;
+            static const char *kw[] = { "nas", "dms", "modem", "qmi", "qcril", "ril", "wds" };
+            int match = 0;
+            for (size_t k = 0; k < sizeof(kw)/sizeof(*kw); k++)
+                if (strstr(e->d_name, kw[k])) { match = 1; break; }
+            if (!match) continue;
+            char p[512];
+            snprintf(p, sizeof(p), "/vendor/lib64/%s", e->d_name);
+            /* Skip already-loaded libs */
+            int already = 0;
+            for (int l = 0; libs[l].path; l++)
+                if (strcmp(libs[l].path, p) == 0) { already = 1; break; }
+            if (already) continue;
+            void *hh = dlopen(p, RTLD_NOW | RTLD_GLOBAL);
+            if (!hh) {
+                const char *err = dlerror();
+                fprintf(stdout, "SCAN FAIL %s: %s\n", p, err ? err : "(null)");
+                fflush(stdout);
+                continue;
+            }
+            fprintf(stdout, "SCAN OK %s\n", p);
+            static const char *ssyms[] = {
+                "nas_get_service_object_v01",
+                "dms_get_service_object_v01",
+                "wds_get_service_object_v01",
+                "qmi_idl_get_service_object_v01",
+            };
+            for (size_t s = 0; s < sizeof(ssyms)/sizeof(*ssyms); s++) {
+                void *sp = dlsym(hh, ssyms[s]);
+                if (sp) {
+                    fprintf(stdout, "SERVICE_OBJ %-32s -> %p @ %s\n",
+                            ssyms[s], sp, p);
+                    if (strcmp(ssyms[s], "nas_get_service_object_v01") == 0) resolved++;
+                }
+            }
+            fflush(stdout);
+        }
+        closedir(d);
+    } else {
+        fprintf(stdout, "SCAN_ERR opendir(/vendor/lib64): %s\n", strerror(errno));
     }
 
     fprintf(stdout, "FOUND %d/%d\n", resolved, total);
