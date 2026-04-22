@@ -43,6 +43,9 @@ fun RatHeader(rat: Rat, available: Boolean) {
         Rat.NR    -> "NR5G"
     }
     val status = if (available) "Testing (Available)" else "Not Available"
+    val glass = LocalDesignVariant.current == DesignVariant.Glass
+    val titleColor = if (glass) GlassColors.AccentRed else NsgColors.Accent
+    val dividerColor = if (glass) GlassColors.DividerSoft else NsgColors.Divider
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -51,12 +54,12 @@ fun RatHeader(rat: Rat, available: Boolean) {
     ) {
         Text(
             text = "$label  •  $status",
-            color = NsgColors.Accent,
+            color = titleColor,
             fontWeight = FontWeight.Bold,
             fontSize = 18.sp,
         )
     }
-    HorizontalDivider(color = NsgColors.Divider, thickness = 1.dp)
+    HorizontalDivider(color = dividerColor, thickness = 1.dp)
 }
 
 /* ------------------------------------------------------------------ */

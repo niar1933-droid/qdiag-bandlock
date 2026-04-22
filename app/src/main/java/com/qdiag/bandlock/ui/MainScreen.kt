@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -178,49 +179,57 @@ fun MainScreen(vm: MainViewModel) {
                     )
                 },
             ) { padding ->
-                Column(
-                    Modifier
-                        .padding(padding)
-                        .fillMaxSize(),
-                ) {
-                    val ratModBase =
-                        if (activePanel == DrawerPanel.None) Modifier.weight(1f)
-                        else Modifier.heightIn(max = 180.dp)
-                    val ratMod = if (glass) {
-                        ratModBase
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 8.dp)
-                            .glassPanel(cornerDp = 22)
-                            .padding(horizontal = 4.dp, vertical = 6.dp)
-                    } else ratModBase
-                    RatPagerSection(state, ratMod)
-                    if (activePanel != DrawerPanel.None) {
-                        if (!glass) HorizontalDivider(color = chromeDivider)
-                        Box(
-                            modifier = if (glass) {
-                                Modifier
-                                    .fillMaxWidth()
-                                    .weight(1f, fill = true)
-                                    .padding(12.dp)
-                                    .glassPanel(cornerDp = 24)
-                                    .padding(14.dp)
-                            } else {
-                                Modifier
-                                    .fillMaxWidth()
-                                    .weight(1f, fill = true)
-                                    .background(NsgColors.Surface)
-                                    .padding(12.dp)
-                            },
-                        ) {
-                            when (activePanel) {
-                                DrawerPanel.BandLock    ->
-                                    if (glass) GlassBandLockPanel(state, vm)
-                                    else       BandLockPanel(state, vm)
-                                DrawerPanel.CellLock    -> CellLockPanel(state, vm)
-                                DrawerPanel.NvInspector -> NvInspectorPanel(state, vm)
-                                DrawerPanel.Sniffer     -> SnifferPanel(state, vm)
-                                DrawerPanel.Log         -> LogPanel(state, vm)
-                                DrawerPanel.None        -> {}
+                if (glass && activePanel == DrawerPanel.None) {
+                    GlassHome(
+                        state = state,
+                        vm = vm,
+                        paddingValues = padding,
+                    )
+                } else {
+                    Column(
+                        Modifier
+                            .padding(padding)
+                            .fillMaxSize(),
+                    ) {
+                        val ratModBase =
+                            if (activePanel == DrawerPanel.None) Modifier.weight(1f)
+                            else Modifier.heightIn(max = 180.dp)
+                        val ratMod = if (glass) {
+                            ratModBase
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                                .glassPanel(cornerDp = 22)
+                                .padding(horizontal = 4.dp, vertical = 6.dp)
+                        } else ratModBase
+                        RatPagerSection(state, ratMod)
+                        if (activePanel != DrawerPanel.None) {
+                            if (!glass) HorizontalDivider(color = chromeDivider)
+                            Box(
+                                modifier = if (glass) {
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .weight(1f, fill = true)
+                                        .padding(12.dp)
+                                        .glassPanel(cornerDp = 24)
+                                        .padding(14.dp)
+                                } else {
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .weight(1f, fill = true)
+                                        .background(NsgColors.Surface)
+                                        .padding(12.dp)
+                                },
+                            ) {
+                                when (activePanel) {
+                                    DrawerPanel.BandLock    ->
+                                        if (glass) GlassBandLockPanel(state, vm)
+                                        else       BandLockPanel(state, vm)
+                                    DrawerPanel.CellLock    -> CellLockPanel(state, vm)
+                                    DrawerPanel.NvInspector -> NvInspectorPanel(state, vm)
+                                    DrawerPanel.Sniffer     -> SnifferPanel(state, vm)
+                                    DrawerPanel.Log         -> LogPanel(state, vm)
+                                    DrawerPanel.None        -> {}
+                                }
                             }
                         }
                     }
@@ -230,6 +239,214 @@ fun MainScreen(vm: MainViewModel) {
     }
     CompositionLocalProvider(LocalDesignVariant provides variant) {
         if (glass) GlassBackdrop { ui() } else ui()
+    }
+}
+
+/* =======================================================================
+ *  Liquid-Glass home screen: three stacked cards like the FoxikNetwork
+ *  mockup — (1) RAT snapshot pager (2) Band preference (3) LTE Cell Table.
+ *  Entire screen is a single verticalScroll so the three cards flow on
+ *  phones of any height. No nested LazyColumns.
+ * ======================================================================= */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun GlassHome(
+    state: UiState,
+    vm: MainViewModel,
+    paddingValues: PaddingValues,
+) {
+    Column(
+        modifier = Modifier
+            .padding(paddingValues)
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        /* ---- Card 1: RAT pager ---------------------------------------- */
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(400.dp)
+                .glassPanel(cornerDp = 24)
+                .padding(horizontal = 4.dp, vertical = 6.dp),
+        ) {
+            RatPagerSection(state, Modifier.fillMaxSize())
+        }
+
+        /* ---- Card 2: Band preference ---------------------------------- */
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .glassPanel(cornerDp = 24)
+                .padding(horizontal = 16.dp, vertical = 16.dp),
+        ) {
+            val lteCount = state.lteMask.enabledBands().size
+            val nrCount  = state.nrMask.enabledBands().size
+            Text(
+                "Band preference",
+                color = GlassColors.TextPrimary,
+                fontWeight = FontWeight.Bold,
+                fontSize = 20.sp,
+            )
+            Text(
+                "LTE: $lteCount selected   •   NR5G: $nrCount selected",
+                color = GlassColors.TextSecondary,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+            Spacer(Modifier.height(14.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .glassPrimaryPill()
+                    .clickable(enabled = !state.busy) { vm.applyBandPreferenceQrtr() },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "Apply",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp,
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                HomeChip("LTE all",  Modifier.weight(1f)) { vm.setAllLte(true) }
+                HomeChip("LTE none", Modifier.weight(1f)) { vm.setAllLte(false) }
+                HomeChip("NR all",   Modifier.weight(1f)) { vm.setAllNr(true) }
+                HomeChip("Reset",    Modifier.weight(1f), enabled = !state.busy) {
+                    vm.resetBandPreference()
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            HorizontalDivider(color = GlassColors.DividerSoft)
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "LTE",
+                color = GlassColors.TextSecondary,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(4.dp))
+            BandCatalog.LTE.forEach { e ->
+                GlassHomeBandRow(
+                    label = "B${e.number}",
+                    sub = e.freqLabel,
+                    checked = state.lteMask.contains(e.number),
+                    onCheckedChange = { vm.toggleLte(e.number, it) },
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "NR5G",
+                color = GlassColors.TextSecondary,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(4.dp))
+            BandCatalog.NR.forEach { e ->
+                GlassHomeBandRow(
+                    label = "n${e.number}",
+                    sub = e.freqLabel,
+                    checked = state.nrMask.contains(e.number),
+                    onCheckedChange = { vm.toggleNr(e.number, it) },
+                )
+            }
+        }
+
+        /* ---- Card 3: LTE Cell Table ----------------------------------- */
+        val lteSnap = state.snapshots[Rat.LTE] ?: RatSnapshot(Rat.LTE, available = false)
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .glassPanel(cornerDp = 24)
+                .padding(horizontal = 12.dp, vertical = 14.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.Menu,
+                    contentDescription = null,
+                    tint = GlassColors.TextSecondary,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "LTE Cell Table",
+                    color = GlassColors.TextPrimary,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp,
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            CellTable(Rat.LTE, lteSnap.rows)
+        }
+
+        Spacer(Modifier.height(4.dp))
+    }
+}
+
+@Composable
+private fun HomeChip(
+    text: String,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = modifier
+            .height(36.dp)
+            .glassPill()
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text,
+            color = GlassColors.TextPrimary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+        )
+    }
+}
+
+@Composable
+private fun GlassHomeBandRow(
+    label: String,
+    sub: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+    ) {
+        Checkbox(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = CheckboxDefaults.colors(
+                checkedColor = GlassColors.Accent,
+                uncheckedColor = GlassColors.TextTertiary,
+                checkmarkColor = Color.White,
+            ),
+        )
+        Spacer(Modifier.width(4.dp))
+        Text(
+            label,
+            color = GlassColors.TextPrimary,
+            fontWeight = FontWeight.Bold,
+            fontSize = 14.sp,
+            modifier = Modifier.width(48.dp),
+        )
+        Text(
+            sub,
+            color = GlassColors.TextSecondary,
+            fontSize = 12.sp,
+            modifier = Modifier.weight(1f),
+        )
     }
 }
 
