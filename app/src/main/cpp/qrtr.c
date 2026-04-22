@@ -9,6 +9,7 @@
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef LOG_TAG
@@ -212,6 +213,13 @@ static int send_new_lookup(uint32_t service, uint32_t instance) {
     return QRTR_RC_OK;
 }
 
+/* Milliseconds since CLOCK_MONOTONIC epoch. */
+static long long now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
+}
+
 int qrtr_lookup(uint32_t service, uint32_t instance, int timeout_ms,
                 uint32_t *out_node, uint32_t *out_port) {
     if (g_sock < 0) return QRTR_RC_NOT_OPEN;
@@ -220,46 +228,59 @@ int qrtr_lookup(uint32_t service, uint32_t instance, int timeout_ms,
     int rc = send_new_lookup(service, instance);
     if (rc < 0) { LOGE("qrtr_lookup send_new_lookup rc=%d errno=%d", rc, errno); return rc; }
 
-    /* Listen for NEW_SERVER broadcasts. */
+    /* Listen for NEW_SERVER broadcasts. HyperOS qrtr-ns does NOT honour
+     * NEW_LOOKUP's service filter — it floods all servers. So we drain every
+     * pending packet on each poll wakeup (MSG_DONTWAIT loop) and match
+     * client-side. Real-time elapsed accounting so a fast flood doesn't
+     * burn the budget on phantom poll_ms decrements. */
     struct pollfd pfd = { .fd = g_sock, .events = POLLIN };
-    int elapsed = 0;
-    int got_packets = 0;
-    while (elapsed < timeout_ms) {
-        int poll_ms = timeout_ms - elapsed;
+    long long t0 = now_ms();
+    int got_packets = 0, non_match = 0;
+    for (;;) {
+        long long elapsed = now_ms() - t0;
+        if (elapsed >= timeout_ms) break;
+        int poll_ms = (int)(timeout_ms - elapsed);
         if (poll_ms > 500) poll_ms = 500;
         int pr = poll(&pfd, 1, poll_ms);
-        if (pr < 0) { save_errno(); return QRTR_RC_RECV_FAIL; }
-        elapsed += poll_ms;
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            save_errno();
+            return QRTR_RC_RECV_FAIL;
+        }
         if (pr == 0) continue;
 
-        uint8_t buf[128];
-        struct sockaddr_qrtr_compat src = { 0 };
-        socklen_t sl = sizeof(src);
-        ssize_t n = recvfrom(g_sock, buf, sizeof(buf), 0,
-                             (struct sockaddr *)&src, &sl);
-        if (n < 0) { save_errno(); return QRTR_RC_RECV_FAIL; }
-        got_packets++;
-        if ((size_t)n < sizeof(struct qrtr_ctrl_pkt)) {
-            LOGI("qrtr_lookup short pkt n=%zd", n);
-            continue;
-        }
-        const struct qrtr_ctrl_pkt *p = (const struct qrtr_ctrl_pkt *)buf;
-        LOGI("qrtr_lookup rx cmd=%u src_node=%u src_port=0x%X svc=0x%X inst=%u node=%u port=0x%X",
-             p->cmd, src.sq_node, src.sq_port,
-             p->service, p->instance, p->node, p->port);
-        if (src.sq_port != QRTR_PORT_CTRL) continue;
-        if (p->cmd != QRTR_TYPE_NEW_SERVER) continue;
-        if (p->service != service) continue;
-        if (instance != 0 && p->instance != instance) continue;
+        /* Drain every packet the kernel has buffered for us in this wakeup. */
+        for (;;) {
+            uint8_t buf[128];
+            struct sockaddr_qrtr_compat src = { 0 };
+            socklen_t sl = sizeof(src);
+            ssize_t n = recvfrom(g_sock, buf, sizeof(buf), MSG_DONTWAIT,
+                                 (struct sockaddr *)&src, &sl);
+            if (n < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                if (errno == EINTR) continue;
+                save_errno();
+                return QRTR_RC_RECV_FAIL;
+            }
+            got_packets++;
+            if ((size_t)n < sizeof(struct qrtr_ctrl_pkt)) continue;
+            const struct qrtr_ctrl_pkt *p = (const struct qrtr_ctrl_pkt *)buf;
+            if (src.sq_port != QRTR_PORT_CTRL) continue;
+            if (p->cmd != QRTR_TYPE_NEW_SERVER) continue;
+            if (p->service != service) { non_match++; continue; }
+            if (instance != 0 && p->instance != instance) { non_match++; continue; }
 
-        if (out_node) *out_node = p->node;
-        if (out_port) *out_port = p->port;
-        LOGI("qrtr_lookup HIT svc=0x%X inst=%u node=%u port=0x%X",
-             p->service, p->instance, p->node, p->port);
-        return QRTR_RC_OK;
+            if (out_node) *out_node = p->node;
+            if (out_port) *out_port = p->port;
+            LOGI("qrtr_lookup HIT svc=0x%X inst=%u node=%u port=0x%X "
+                 "(after %d pkts, %d non-match)",
+                 p->service, p->instance, p->node, p->port,
+                 got_packets, non_match);
+            return QRTR_RC_OK;
+        }
     }
-    LOGE("qrtr_lookup timeout svc=0x%02X inst=%u (received %d ctrl pkts, none matched)",
-         service, instance, got_packets);
+    LOGE("qrtr_lookup timeout svc=0x%02X inst=%u (%d pkts drained, %d non-match)",
+         service, instance, got_packets, non_match);
     return QRTR_RC_NO_SERVICE;
 }
 
