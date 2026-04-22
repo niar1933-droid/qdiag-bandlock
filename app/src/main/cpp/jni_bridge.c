@@ -1078,14 +1078,17 @@ static void init_ns_api(void) {
     static int tried = 0;
     if (tried) return;
     tried = 1;
-    void *libdl = dlopen("libdl_android.so", RTLD_NOW);
-    if (!libdl) libdl = dlopen("libdl.so", RTLD_NOW);
-    if (libdl) {
-        p_get_ns = (p_android_get_exported_namespace_t)
-                   dlsym(libdl, "android_get_exported_namespace");
+    /* Both symbols are exported by the dynamic linker; RTLD_DEFAULT works. */
+    p_get_ns = (p_android_get_exported_namespace_t)
+               dlsym(RTLD_DEFAULT, "android_get_exported_namespace");
+    if (!p_get_ns) {
+        /* Some Androids hide it behind libdl_android.so. */
+        void *libdl = dlopen("libdl_android.so", RTLD_NOW | RTLD_GLOBAL);
+        if (libdl) {
+            p_get_ns = (p_android_get_exported_namespace_t)
+                       dlsym(libdl, "android_get_exported_namespace");
+        }
     }
-    /* android_dlopen_ext is exported by the linker stub; standard dlsym
-     * against RTLD_DEFAULT usually finds it. */
     p_dlopen_ext = (p_android_dlopen_ext_t)dlsym(RTLD_DEFAULT, "android_dlopen_ext");
     LOGI("vendor-qmi: ns api get_exported_namespace=%p android_dlopen_ext=%p",
          p_get_ns, p_dlopen_ext);
