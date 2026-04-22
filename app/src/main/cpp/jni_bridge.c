@@ -455,10 +455,22 @@ Java_com_qdiag_bandlock_diag_DiagNative_qrtrSetBandPref(
         JNIEnv *env, jclass clz,
         jlong lteLow, jlong lteHigh, jlong nrLow, jlong nrHigh) {
     (void)env; (void)clz;
-    if (!qrtr_is_open()) return QRTR_RC_NOT_OPEN;
+    /* Always cycle the socket before a new transaction: (1) re-applies the
+     * radio-UID drop so the fresh struct sock gets the right creator creds,
+     * (2) flushes any stale NEW_SERVER CTRL broadcasts left over from a
+     * previous Enumerate that would otherwise be consumed in place of our
+     * NEW_LOOKUP reply. */
+    qrtr_close();
+    int orc = qrtr_open();
+    if (orc < 0) return orc;
 
     uint32_t node = 0, port = 0;
-    int rc = qrtr_lookup(QMI_SVC_NAS, 0, 3000, &node, &port);
+    /* Try instance=1 first (enumerate shows NAS at inst=1 on HyperOS), then
+     * fall back to instance=0 (wildcard) if 1 misses. */
+    int rc = qrtr_lookup(QMI_SVC_NAS, 1, 2000, &node, &port);
+    if (rc == QRTR_RC_NO_SERVICE) {
+        rc = qrtr_lookup(QMI_SVC_NAS, 0, 2000, &node, &port);
+    }
     if (rc < 0) return rc;
 
     /* Build TLVs for SET_SYSTEM_SELECTION_PREFERENCE. Same layout as over
