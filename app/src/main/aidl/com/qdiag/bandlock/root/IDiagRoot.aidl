@@ -134,4 +134,9 @@ interface IDiagRoot {
      *  1 if version reply but no client id, -1 if no socket opens at all,
      *  -2/-3 for handshake failures. See logcat tag qdiag-jni. */
     int qmuxProbeCellLock(int earfcn, int pci);
+
+    /** Vendor QMI library probe (NSG path). dlopen /vendor/lib64/libqmi_client_qmux.so
+     *  + deps, resolve classic Qualcomm QMI entrypoints. Returns 0 if library
+     *  cannot be loaded at all; else 0x10000|symbolMask. See DiagNative kdoc. */
+    int qmiVendorProbe();
 }

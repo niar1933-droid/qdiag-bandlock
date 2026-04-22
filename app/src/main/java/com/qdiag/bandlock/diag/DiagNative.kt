@@ -116,6 +116,22 @@ object DiagNative {
      */
     @JvmStatic external fun qmuxProbeCellLock(earfcn: Int, pci: Int): Int
 
+    /** Vendor QMI library probe (NSG path). Tries to dlopen
+     *  /vendor/lib64/libqmi_client_qmux.so + deps, and dlsym the classic
+     *  Qualcomm QMI client entrypoints NSG uses for cell lock.
+     *  Returns:
+     *    0                 — library could not be loaded at all
+     *    0x10000|mask      — loaded; `mask` bits indicate which symbols resolved
+     *      bit0: qmi_client_init_instance
+     *      bit1: qmi_client_init
+     *      bit2: qmi_client_send_msg_sync
+     *      bit3: qmi_client_send_msg_async
+     *      bit4: qmi_client_release
+     *      bit5: qmi_linux_get_internal_use_port
+     *      bit6: qmi_linux_get_conn_id_by_name
+     */
+    @JvmStatic external fun qmiVendorProbe(): Int
+
     /* ---------- DIAG sniffer (background HDLC-decoded frame capture) ---------- */
 
     @JvmStatic external fun snifferStart(): Boolean

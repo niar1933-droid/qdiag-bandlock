@@ -1055,3 +1055,72 @@ Java_com_qdiag_bandlock_diag_DiagNative_qrtrClearCellLock(
     }
     return (ok == 0) ? 0 : (jint)(0x10000 | 0x003E);
 }
+
+/* ========================================================================== */
+/* Vendor QMI probe — NSG path: dlopen /vendor/lib64/libqmi_client_qmux.so    */
+/* and resolve its Linux-userspace helpers + classic qmi_client_* entrypoints.*/
+/* Returns bitmask of features found; 0 means library not loadable at all.    */
+/* ========================================================================== */
+#include <dlfcn.h>
+
+static void *try_dlopen(const char *path) {
+    void *h = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+    if (h) {
+        LOGI("vendor-qmi: dlopen OK %s -> %p", path, h);
+    } else {
+        LOGE("vendor-qmi: dlopen FAIL %s: %s", path, dlerror());
+    }
+    return h;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_qmiVendorProbe(
+        JNIEnv *env, jclass clz) {
+    (void)env; (void)clz;
+
+    /* Pre-load common dependencies first so symbol resolution order is right. */
+    static const char *deps[] = {
+        "/vendor/lib64/libqmi_cci.so",
+        "/vendor/lib64/libqmi_common_so.so",
+        "/vendor/lib64/libqmi_encdec.so",
+        "/vendor/lib64/libqmi_csi.so",
+        "/vendor/lib64/libqmi_client_helper.so",
+        NULL,
+    };
+    for (int i = 0; deps[i]; i++) (void)try_dlopen(deps[i]);
+
+    void *h = try_dlopen("/vendor/lib64/libqmi_client_qmux.so");
+    if (!h) {
+        return 0;  /* dlopen refused — namespace / selinux / missing sym */
+    }
+
+    /* Symbols NSG uses (from RE of libqtrun_arch_jni.so). */
+    static const char *syms[] = {
+        "qmi_client_init_instance",
+        "qmi_client_init",
+        "qmi_client_send_msg_sync",
+        "qmi_client_send_msg_async",
+        "qmi_client_release",
+        "qmi_linux_get_internal_use_port",
+        "qmi_linux_get_conn_id_by_name",
+        "qmi_idl_get_service_object_v01",
+        "qmuxd_get_service_object",
+        NULL,
+    };
+    int found = 0;
+    int mask = 0;
+    for (int i = 0; syms[i]; i++) {
+        void *p = dlsym(h, syms[i]);
+        if (p) {
+            LOGI("vendor-qmi: dlsym OK %-40s -> %p", syms[i], p);
+            found++;
+            if (i < 16) mask |= (1 << i);
+        } else {
+            LOGI("vendor-qmi: dlsym MISS %s (%s)", syms[i], dlerror());
+        }
+    }
+    LOGI("vendor-qmi: %d/%d symbols resolved, mask=0x%04X", found, (int)(sizeof(syms)/sizeof(*syms))-1, mask);
+
+    /* Keep handle open so future transactions can reuse. */
+    return (jint)(0x10000 | mask);
+}

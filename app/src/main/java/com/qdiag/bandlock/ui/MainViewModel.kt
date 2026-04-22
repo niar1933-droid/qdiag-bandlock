@@ -346,16 +346,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val earfcn = s.lockEarfcn.toIntOrNull()
         val pci = s.lockPci.toIntOrNull()
         if (earfcn == null || pci == null) { toast("EARFCN and PCI must be integers"); return@withApi }
-        val qmux = api.qmuxProbeCellLock(earfcn, pci)
-        val hint = when (qmux) {
-            0   -> "qmuxd ALIVE + NAS client OK (NSG-path viable)"
-            1   -> "qmuxd reachable, но GET_CLIENT_ID(NAS) молчит"
-            -1  -> "qmuxd СОКЕТ НЕ ОТКРЫЛСЯ — qmuxd на этом ядре выключен"
-            -2  -> "сокет открыт, но нет ответа (peer-cred отверг?)"
-            -3  -> "сокет открыт, read() упал"
-            else -> "qmux-probe rc=$qmux"
+        val v = api.qmiVendorProbe()
+        val vHint = if (v == 0) {
+            "libqmi_client_qmux.so: NOT LOADABLE (dlopen отвергнут — namespace/SELinux)"
+        } else {
+            val m = v and 0xFFFF
+            val names = listOf(
+                "init_instance", "init", "send_sync", "send_async",
+                "release", "get_port", "get_conn_id",
+            )
+            val found = names.mapIndexedNotNull { i, n -> if ((m shr i) and 1 == 1) n else null }
+            "libqmi_client_qmux.so: LOADED, mask=0x${"%04X".format(m)} [${found.joinToString(",")}]"
         }
-        toast("qmux probe → $hint (см. logcat qdiag-jni)")
+        toast("vendor-qmi → $vHint (см. logcat qdiag-jni)")
     }
 
     fun clearCellLock() = withApi { api ->
