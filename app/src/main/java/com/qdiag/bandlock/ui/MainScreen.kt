@@ -359,33 +359,6 @@ private fun GlassHome(
             }
         }
 
-        /* ---- Card 3: LTE Cell Table ----------------------------------- */
-        val lteSnap = state.snapshots[Rat.LTE] ?: RatSnapshot(Rat.LTE, available = false)
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .glassPanel(cornerDp = 24)
-                .padding(horizontal = 12.dp, vertical = 14.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    Icons.Default.Menu,
-                    contentDescription = null,
-                    tint = GlassColors.TextSecondary,
-                    modifier = Modifier.size(18.dp),
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    "LTE Cell Table",
-                    color = GlassColors.TextPrimary,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 18.sp,
-                )
-            }
-            Spacer(Modifier.height(10.dp))
-            CellTable(Rat.LTE, lteSnap.rows)
-        }
-
         Spacer(Modifier.height(4.dp))
     }
 }
