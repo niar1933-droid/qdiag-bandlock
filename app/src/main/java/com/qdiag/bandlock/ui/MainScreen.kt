@@ -1,6 +1,7 @@
 package com.qdiag.bandlock.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,9 +22,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
@@ -77,115 +80,144 @@ fun MainScreen(vm: MainViewModel) {
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     var activePanel by remember { mutableStateOf(DrawerPanel.None) }
+    var variant by rememberSaveable { mutableStateOf(DesignVariant.Nsg) }
+    val glass = variant == DesignVariant.Glass
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(vm) {
         vm.toasts.collect { snackbar.showSnackbar(it) }
     }
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
-            ModalDrawerSheet(
-                drawerContainerColor = NsgColors.Surface,
-            ) {
-                Text(
-                    "FoxikNetwork",
-                    color = NsgColors.Accent,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 18.sp,
-                    modifier = Modifier.padding(16.dp),
-                )
-                HorizontalDivider(color = NsgColors.Divider)
-                DrawerRow("Band Lock (LTE / NR)") {
-                    activePanel = DrawerPanel.BandLock
-                    scope.launch { drawerState.close() }
-                }
-                DrawerRow("Cell Lock (LTE PCI)") {
-                    activePanel = DrawerPanel.CellLock
-                    scope.launch { drawerState.close() }
-                }
-                DrawerRow("NV Inspector (EFS2)") {
-                    activePanel = DrawerPanel.NvInspector
-                    scope.launch { drawerState.close() }
-                }
-                DrawerRow("DIAG Sniffer") {
-                    activePanel = DrawerPanel.Sniffer
-                    scope.launch { drawerState.close() }
-                }
-                DrawerRow("Command Log") {
-                    activePanel = DrawerPanel.Log
-                    scope.launch { drawerState.close() }
-                }
-                HorizontalDivider(color = NsgColors.Divider)
-                DrawerRow("Close panel") {
-                    activePanel = DrawerPanel.None
-                    scope.launch { drawerState.close() }
-                }
-            }
-        },
-    ) {
-        Scaffold(
-            containerColor = NsgColors.Background,
-            snackbarHost = { SnackbarHost(snackbar) },
-            topBar = {
-                TopAppBar(
-                    title = { Text("FoxikNetwork", color = NsgColors.Accent, fontWeight = FontWeight.Bold) },
-                    navigationIcon = {
-                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                            Icon(Icons.Default.Menu, "menu", tint = NsgColors.TextPrimary)
-                        }
-                    },
-                    actions = {
-                        Text(
-                            text = "root:${rootShort(state.rootStatus)}  " +
-                                "svc:${if (state.apiBound) "ok" else "-"}  " +
-                                "diag:${if (state.diagOpen) "open" else "-"}",
-                            color = NsgColors.TextLabel,
-                            fontSize = 12.sp,
-                            modifier = Modifier.padding(end = 12.dp),
-                        )
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = NsgColors.Surface,
-                        titleContentColor = NsgColors.Accent,
-                    ),
-                )
-            },
-        ) { padding ->
-            Column(
-                Modifier
-                    .padding(padding)
-                    .fillMaxSize()
-                    .background(NsgColors.Background),
-            ) {
-                /* When a drawer panel is open the operator is interacting with
-                 * band/cell/NV/sniffer content, so collapse the RAT pager to a
-                 * compact status strip and let the panel dominate. */
-                if (activePanel == DrawerPanel.None) {
-                    RatPagerSection(state, Modifier.weight(1f))
-                } else {
-                    RatPagerSection(state, Modifier.heightIn(max = 180.dp))
-                    HorizontalDivider(color = NsgColors.Divider)
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f, fill = true)
-                            .background(NsgColors.Surface)
-                            .padding(12.dp),
+    val chromeText      = if (glass) GlassColors.TextPrimary else NsgColors.TextPrimary
+    val chromeLabel     = if (glass) GlassColors.TextSecondary else NsgColors.TextLabel
+    val chromeAccent    = if (glass) GlassColors.Accent else NsgColors.Accent
+    val chromeDivider   = if (glass) GlassColors.DividerSoft else NsgColors.Divider
+    val chromeBgColor   = if (glass) Color.Transparent else NsgColors.Background
+    val chromeSurface   = if (glass) Color.Transparent else NsgColors.Surface
+    val drawerContainer = if (glass) GlassColors.PanelFillStrong else NsgColors.Surface
+
+    val ui: @Composable () -> Unit = {
+        ModalNavigationDrawer(
+            drawerState = drawerState,
+            drawerContent = {
+                ModalDrawerSheet(
+                    drawerContainerColor = drawerContainer,
+                ) {
+                    Text(
+                        "FoxikNetwork",
+                        color = chromeAccent,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp,
+                        modifier = Modifier.padding(16.dp),
+                    )
+                    HorizontalDivider(color = chromeDivider)
+                    DrawerRow("Band Lock (LTE / NR)", chromeText) {
+                        activePanel = DrawerPanel.BandLock
+                        scope.launch { drawerState.close() }
+                    }
+                    DrawerRow("Cell Lock (LTE PCI)", chromeText) {
+                        activePanel = DrawerPanel.CellLock
+                        scope.launch { drawerState.close() }
+                    }
+                    DrawerRow("NV Inspector (EFS2)", chromeText) {
+                        activePanel = DrawerPanel.NvInspector
+                        scope.launch { drawerState.close() }
+                    }
+                    DrawerRow("DIAG Sniffer", chromeText) {
+                        activePanel = DrawerPanel.Sniffer
+                        scope.launch { drawerState.close() }
+                    }
+                    DrawerRow("Command Log", chromeText) {
+                        activePanel = DrawerPanel.Log
+                        scope.launch { drawerState.close() }
+                    }
+                    HorizontalDivider(color = chromeDivider)
+                    DrawerRow(
+                        if (glass) "Theme: Liquid Glass (iOS) → tap to switch to NSG"
+                        else       "Theme: NSG (dark) → tap to switch to Liquid Glass",
+                        chromeAccent,
                     ) {
-                        when (activePanel) {
-                            DrawerPanel.BandLock    -> BandLockPanel(state, vm)
-                            DrawerPanel.CellLock    -> CellLockPanel(state, vm)
-                            DrawerPanel.NvInspector -> NvInspectorPanel(state, vm)
-                            DrawerPanel.Sniffer     -> SnifferPanel(state, vm)
-                            DrawerPanel.Log         -> LogPanel(state, vm)
-                            DrawerPanel.None        -> {}
+                        variant = if (glass) DesignVariant.Nsg else DesignVariant.Glass
+                        scope.launch { drawerState.close() }
+                    }
+                    HorizontalDivider(color = chromeDivider)
+                    DrawerRow("Close panel", chromeText) {
+                        activePanel = DrawerPanel.None
+                        scope.launch { drawerState.close() }
+                    }
+                }
+            },
+        ) {
+            Scaffold(
+                containerColor = chromeBgColor,
+                snackbarHost = { SnackbarHost(snackbar) },
+                topBar = {
+                    TopAppBar(
+                        title = { Text("FoxikNetwork", color = chromeAccent, fontWeight = FontWeight.Bold) },
+                        navigationIcon = {
+                            IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                                Icon(Icons.Default.Menu, "menu", tint = chromeText)
+                            }
+                        },
+                        actions = {
+                            Text(
+                                text = "root:${rootShort(state.rootStatus)}  " +
+                                    "svc:${if (state.apiBound) "ok" else "-"}  " +
+                                    "diag:${if (state.diagOpen) "open" else "-"}",
+                                color = chromeLabel,
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(end = 12.dp),
+                            )
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(
+                            containerColor = chromeSurface,
+                            titleContentColor = chromeAccent,
+                        ),
+                    )
+                },
+            ) { padding ->
+                Column(
+                    Modifier
+                        .padding(padding)
+                        .fillMaxSize(),
+                ) {
+                    if (activePanel == DrawerPanel.None) {
+                        RatPagerSection(state, Modifier.weight(1f))
+                    } else {
+                        RatPagerSection(state, Modifier.heightIn(max = 180.dp))
+                        HorizontalDivider(color = chromeDivider)
+                        Box(
+                            modifier = if (glass) {
+                                Modifier
+                                    .fillMaxWidth()
+                                    .weight(1f, fill = true)
+                                    .padding(12.dp)
+                                    .glassPanel(cornerDp = 24)
+                                    .padding(14.dp)
+                            } else {
+                                Modifier
+                                    .fillMaxWidth()
+                                    .weight(1f, fill = true)
+                                    .background(NsgColors.Surface)
+                                    .padding(12.dp)
+                            },
+                        ) {
+                            when (activePanel) {
+                                DrawerPanel.BandLock    ->
+                                    if (glass) GlassBandLockPanel(state, vm)
+                                    else       BandLockPanel(state, vm)
+                                DrawerPanel.CellLock    -> CellLockPanel(state, vm)
+                                DrawerPanel.NvInspector -> NvInspectorPanel(state, vm)
+                                DrawerPanel.Sniffer     -> SnifferPanel(state, vm)
+                                DrawerPanel.Log         -> LogPanel(state, vm)
+                                DrawerPanel.None        -> {}
+                            }
                         }
                     }
                 }
             }
         }
     }
+    if (glass) GlassBackdrop { ui() } else ui()
 }
 
 private fun rootShort(s: RootClient.Status): String = when (s) {
@@ -196,9 +228,9 @@ private fun rootShort(s: RootClient.Status): String = when (s) {
 }
 
 @Composable
-private fun DrawerRow(text: String, onClick: () -> Unit) {
+private fun DrawerRow(text: String, color: Color = NsgColors.TextPrimary, onClick: () -> Unit) {
     NavigationDrawerItem(
-        label = { Text(text, color = NsgColors.TextPrimary) },
+        label = { Text(text, color = color) },
         selected = false,
         onClick = onClick,
         modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
@@ -230,53 +262,74 @@ private fun RatPagerSection(state: UiState, modifier: Modifier = Modifier) {
 
 @Composable
 private fun BandLockPanel(state: UiState, vm: MainViewModel) {
+    val lteCount = state.lteMask.enabledBands().size
+    val nrCount  = state.nrMask.enabledBands().size
+
     Column(Modifier.fillMaxSize()) {
         Text(
             "Band preference",
             color = NsgColors.Accent,
             fontWeight = FontWeight.Bold,
-            fontSize = 14.sp,
+            fontSize = 15.sp,
         )
-        Spacer(Modifier.height(6.dp))
-        Row {
-            OutlinedButton(onClick = { vm.setAllLte(true) }) { Text("LTE all") }
-            Spacer(Modifier.width(6.dp))
-            OutlinedButton(onClick = { vm.setAllLte(false) }) { Text("LTE none") }
-            Spacer(Modifier.width(12.dp))
-            OutlinedButton(onClick = { vm.setAllNr(true) }) { Text("NR all") }
-            Spacer(Modifier.width(6.dp))
-            OutlinedButton(onClick = { vm.setAllNr(false) }) { Text("NR none") }
-        }
-        Spacer(Modifier.height(4.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(
-                onClick = vm::applyBandPreferenceQmux,
-                enabled = !state.busy,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = NsgColors.Accent,
-                    contentColor = Color.White,
-                ),
-            ) { Text("Apply (QMUX)", fontWeight = FontWeight.Bold) }
-            OutlinedButton(onClick = vm::applyBandPreferenceQrtr, enabled = !state.busy) { Text("QRTR") }
-            OutlinedButton(onClick = vm::applyBandPreferenceEfs, enabled = !state.busy) { Text("EFS") }
-            OutlinedButton(onClick = vm::applyBandPreference, enabled = !state.busy) { Text("DIAG") }
-            OutlinedButton(onClick = vm::resetBandPreference, enabled = !state.busy) { Text("Reset") }
-        }
         Text(
-            "Apply (QMUX) — AF_UNIX /dev/socket/qmux_radio/ril_ipc. Штатный путь qcrild. " +
-                "Работает БЕЗ /dev/diag и в обход qrtr-ns фильтрации модемных QMI на HyperOS. " +
-                "QRTR — прямой AF_QIPCRTR (если ns не фильтрует). EFS — NV-items. DIAG — QMI-over-DIAG.",
+            "LTE: $lteCount selected   •   NR5G: $nrCount selected",
             color = NsgColors.TextLabel,
-            fontSize = 10.sp,
-            modifier = Modifier.padding(vertical = 4.dp),
+            fontSize = 11.sp,
+            modifier = Modifier.padding(top = 2.dp),
         )
-        OutlinedButton(onClick = vm::enumerateQrtr, enabled = !state.busy) {
-            Text("Enumerate QRTR services")
+
+        Spacer(Modifier.height(10.dp))
+        Button(
+            onClick = vm::applyBandPreferenceQrtr,
+            enabled = !state.busy,
+            modifier = Modifier.fillMaxWidth().height(44.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = NsgColors.Accent,
+                contentColor = Color.White,
+            ),
+        ) { Text("Apply", fontWeight = FontWeight.Bold, fontSize = 14.sp) }
+
+        Spacer(Modifier.height(6.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            OutlinedButton(
+                onClick = { vm.setAllLte(true) },
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp),
+            ) { Text("LTE all", fontSize = 12.sp) }
+            OutlinedButton(
+                onClick = { vm.setAllLte(false) },
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp),
+            ) { Text("LTE none", fontSize = 12.sp) }
+            OutlinedButton(
+                onClick = { vm.setAllNr(true) },
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp),
+            ) { Text("NR all", fontSize = 12.sp) }
+            OutlinedButton(
+                onClick = { vm.setAllNr(false) },
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp),
+            ) { Text("NR none", fontSize = 12.sp) }
+            OutlinedButton(
+                onClick = vm::resetBandPreference,
+                enabled = !state.busy,
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp),
+            ) { Text("Reset", fontSize = 12.sp) }
         }
+
+        Spacer(Modifier.height(12.dp))
+        HorizontalDivider(color = NsgColors.Divider)
         Spacer(Modifier.height(8.dp))
+
         LazyColumn(Modifier.weight(1f, fill = true)) {
             item {
-                Text("LTE", color = NsgColors.TextLabel, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                SectionHeader("LTE")
             }
             items(BandCatalog.LTE) { e ->
                 BandCheckboxRow(
@@ -287,8 +340,8 @@ private fun BandLockPanel(state: UiState, vm: MainViewModel) {
                 )
             }
             item {
-                Spacer(Modifier.height(6.dp))
-                Text("NR5G", color = NsgColors.TextLabel, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(10.dp))
+                SectionHeader("NR5G")
             }
             items(BandCatalog.NR) { e ->
                 BandCheckboxRow(
@@ -303,6 +356,17 @@ private fun BandLockPanel(state: UiState, vm: MainViewModel) {
 }
 
 @Composable
+private fun SectionHeader(text: String) {
+    Text(
+        text,
+        color = NsgColors.TextLabel,
+        fontSize = 11.sp,
+        fontWeight = FontWeight.Bold,
+        modifier = Modifier.padding(vertical = 4.dp),
+    )
+}
+
+@Composable
 private fun BandCheckboxRow(
     label: String,
     sub: String,
@@ -314,9 +378,171 @@ private fun BandCheckboxRow(
         modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
     ) {
         Checkbox(checked = checked, onCheckedChange = onCheckedChange)
-        Spacer(Modifier.width(6.dp))
-        Text(label, color = NsgColors.TextPrimary, fontWeight = FontWeight.Bold, modifier = Modifier.width(60.dp))
-        Text(sub, color = NsgColors.TextLabel, fontSize = 12.sp)
+        Spacer(Modifier.width(4.dp))
+        Text(
+            label,
+            color = NsgColors.TextPrimary,
+            fontWeight = FontWeight.Bold,
+            fontSize = 14.sp,
+            modifier = Modifier.width(48.dp),
+        )
+        Text(
+            sub,
+            color = NsgColors.TextLabel,
+            fontSize = 12.sp,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/* ----------------------- Band Lock panel (Liquid Glass variant) ----------------------- */
+
+@Composable
+private fun GlassBandLockPanel(state: UiState, vm: MainViewModel) {
+    val lteCount = state.lteMask.enabledBands().size
+    val nrCount  = state.nrMask.enabledBands().size
+
+    Column(Modifier.fillMaxSize()) {
+        Text(
+            "Band preference",
+            color = GlassColors.TextPrimary,
+            fontWeight = FontWeight.Bold,
+            fontSize = 17.sp,
+        )
+        Text(
+            "LTE: $lteCount selected   •   NR5G: $nrCount selected",
+            color = GlassColors.TextSecondary,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+
+        Spacer(Modifier.height(14.dp))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(50.dp)
+                .glassPrimaryPill()
+                .clickable(enabled = !state.busy) { vm.applyBandPreferenceQrtr() },
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "Apply",
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                fontSize = 15.sp,
+            )
+        }
+
+        Spacer(Modifier.height(10.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            GlassPillButton("LTE all",  Modifier.weight(1f)) { vm.setAllLte(true) }
+            GlassPillButton("LTE none", Modifier.weight(1f)) { vm.setAllLte(false) }
+            GlassPillButton("NR all",   Modifier.weight(1f)) { vm.setAllNr(true) }
+            GlassPillButton("NR none",  Modifier.weight(1f)) { vm.setAllNr(false) }
+            GlassPillButton("Reset",    Modifier.weight(1f), enabled = !state.busy) { vm.resetBandPreference() }
+        }
+
+        Spacer(Modifier.height(14.dp))
+        HorizontalDivider(color = GlassColors.DividerSoft)
+        Spacer(Modifier.height(8.dp))
+
+        LazyColumn(Modifier.weight(1f, fill = true)) {
+            item { GlassSectionHeader("LTE") }
+            items(BandCatalog.LTE) { e ->
+                GlassBandCheckboxRow(
+                    label = "B${e.number}",
+                    sub = e.freqLabel,
+                    checked = state.lteMask.contains(e.number),
+                    onCheckedChange = { vm.toggleLte(e.number, it) },
+                )
+            }
+            item {
+                Spacer(Modifier.height(10.dp))
+                GlassSectionHeader("NR5G")
+            }
+            items(BandCatalog.NR) { e ->
+                GlassBandCheckboxRow(
+                    label = "n${e.number}",
+                    sub = e.freqLabel,
+                    checked = state.nrMask.contains(e.number),
+                    onCheckedChange = { vm.toggleNr(e.number, it) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun GlassPillButton(
+    text: String,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = modifier
+            .height(36.dp)
+            .glassPill()
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text,
+            color = GlassColors.TextPrimary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+        )
+    }
+}
+
+@Composable
+private fun GlassSectionHeader(text: String) {
+    Text(
+        text,
+        color = GlassColors.TextSecondary,
+        fontSize = 12.sp,
+        fontWeight = FontWeight.Bold,
+        modifier = Modifier.padding(vertical = 4.dp),
+    )
+}
+
+@Composable
+private fun GlassBandCheckboxRow(
+    label: String,
+    sub: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+    ) {
+        Checkbox(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = CheckboxDefaults.colors(
+                checkedColor = GlassColors.Accent,
+                uncheckedColor = GlassColors.TextTertiary,
+                checkmarkColor = Color.White,
+            ),
+        )
+        Spacer(Modifier.width(4.dp))
+        Text(
+            label,
+            color = GlassColors.TextPrimary,
+            fontWeight = FontWeight.Bold,
+            fontSize = 14.sp,
+            modifier = Modifier.width(48.dp),
+        )
+        Text(
+            sub,
+            color = GlassColors.TextSecondary,
+            fontSize = 12.sp,
+            modifier = Modifier.weight(1f),
+        )
     }
 }
 
