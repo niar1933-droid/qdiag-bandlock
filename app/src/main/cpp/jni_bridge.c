@@ -517,47 +517,33 @@ Java_com_qdiag_bandlock_diag_DiagNative_qrtrSetBandPref(
     LOGI("LTE apply result=%u err=0x%04X", result, err);
     int primary_rc = (result == 0) ? 0 : (int)(0x10000 | err);
 
-    /* ---- NR5G probe (when user selected NR bands). Try a few candidate
-     * TLV IDs and log each reply.  These are "nice to have" — LTE has
-     * already been applied by the primary request above regardless of
-     * what happens here. */
+    /* ---- NR5G band preference (empirically verified on X70 HyperOS):
+     *   TLV 0x40  NR5G SA Band Pref    u128 LE
+     *   TLV 0x41  NR5G NSA Band Pref   u128 LE
+     * Sent as a separate transaction so an NR-side rejection does not
+     * undo the LTE change above. */
     if (have_nr) {
-        typedef struct {
-            const char *name;
-            uint8_t ids[2];   /* up to 2 TLVs */
-            int     count;
-        } nr_variant_t;
-        nr_variant_t NV[] = {
-            { "nr24+25",  {0x24, 0x25}, 2 },  /* most common libqmi layout */
-            { "nr40+41",  {0x40, 0x41}, 2 },  /* vendor-extended range */
-            { "nr50+51",  {0x50, 0x51}, 2 },
-            { "nr30+31",  {0x30, 0x31}, 2 },
-            { "nr24",     {0x24, 0x00}, 1 },
-            { "nr40",     {0x40, 0x00}, 1 },
-        };
-        int NVN = (int)(sizeof(NV) / sizeof(NV[0]));
-        for (int i = 0; i < NVN; i++) {
-            uint8_t t[96]; size_t to2 = 0;
-            t[to2++] = 0x11; t[to2++] = 0x02; t[to2++] = 0x00;
-            t[to2++] = (uint8_t)(mode_pref & 0xFF);
-            t[to2++] = (uint8_t)((mode_pref >> 8) & 0xFF);
-            for (int j = 0; j < NV[i].count; j++) {
-                t[to2++] = NV[i].ids[j]; t[to2++] = 0x10; t[to2++] = 0x00;
-                for (int k = 0; k < 8; k++) t[to2++] = (uint8_t)((nrLow  >> (8*k)) & 0xFF);
-                for (int k = 0; k < 8; k++) t[to2++] = (uint8_t)((nrHigh >> (8*k)) & 0xFF);
-            }
-            uint8_t rq[256];
-            size_t rl = qrtr_build_qmi_request(rq, sizeof(rq), 0x0033, t, to2);
-            uint8_t rxb[2048];
-            int m = qrtr_transact(node, port, rq, rl, rxb, sizeof(rxb), 3000);
-            if (m < 0) { LOGE("nr-probe[%d] %s rc=%d", i, NV[i].name, m); continue; }
+        uint8_t t[96]; size_t to2 = 0;
+        t[to2++] = 0x11; t[to2++] = 0x02; t[to2++] = 0x00;
+        t[to2++] = (uint8_t)(mode_pref & 0xFF);
+        t[to2++] = (uint8_t)((mode_pref >> 8) & 0xFF);
+        for (uint8_t id = 0x40; id <= 0x41; id++) {
+            t[to2++] = id; t[to2++] = 0x10; t[to2++] = 0x00;
+            for (int k = 0; k < 8; k++) t[to2++] = (uint8_t)((nrLow  >> (8*k)) & 0xFF);
+            for (int k = 0; k < 8; k++) t[to2++] = (uint8_t)((nrHigh >> (8*k)) & 0xFF);
+        }
+        uint8_t rq[256];
+        size_t rl = qrtr_build_qmi_request(rq, sizeof(rq), 0x0033, t, to2);
+        uint8_t rxb[2048];
+        int m = qrtr_transact(node, port, rq, rl, rxb, sizeof(rxb), 5000);
+        if (m >= 0) {
             uint16_t nmid, nresult, nerr;
-            if (qrtr_parse_qmi_response(rxb, (size_t)m, &nmid, &nresult, &nerr) < 0) {
-                LOGE("nr-probe[%d] %s bad-frame", i, NV[i].name); continue;
+            if (qrtr_parse_qmi_response(rxb, (size_t)m, &nmid, &nresult, &nerr) >= 0) {
+                LOGI("NR5G apply result=%u err=0x%04X", nresult, nerr);
+                if (primary_rc == 0 && nresult != 0) primary_rc = (int)(0x10000 | nerr);
             }
-            LOGI("nr-probe[%d] %s result=%u err=0x%04X", i, NV[i].name, nresult, nerr);
-            if (nresult == 0) break;                /* stop on success */
-            if (nerr != 0x0001) break;              /* stop on non-MALFORMED */
+        } else {
+            LOGE("NR5G apply transact rc=%d", m);
         }
     }
 
