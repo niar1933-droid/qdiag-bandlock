@@ -30,6 +30,32 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <elf.h>
+#include <signal.h>
+#include <setjmp.h>
+
+/* Signal-safe wrapper: some of the IDL-struct walking code dereferences
+ * pointers whose offsets we inferred from reverse-engineering. If the
+ * offset is wrong we'd SEGV; a longjmp-in-handler keeps the helper alive
+ * and lets subsequent phases still run. */
+static sigjmp_buf g_fault_jmp;
+static volatile int g_fault_armed = 0;
+
+static void fault_handler(int sig) {
+    (void)sig;
+    if (g_fault_armed) {
+        g_fault_armed = 0;
+        siglongjmp(g_fault_jmp, 1);
+    }
+}
+
+static void install_fault_handler(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = fault_handler;
+    sa.sa_flags   = SA_NODEFER;
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS,  &sa, NULL);
+}
 
 /* Dual-destination printf: stdout (seen by jni_bridge popen) AND a log file
  * the user can cat from the shell if logcat buffer rolls over. */
@@ -558,31 +584,180 @@ static void probe_send(void *handle, const char *service_tag,
     }
 }
 
-/* Full-range sweep: probe every msg_id in [lo, hi] on the given client,
- * log only accepted ids (rc == 0) and dump response bytes for the ones
- * that returned payload > 2 bytes (tiny 2-byte responses are usually
- * just the success result TLV with no data). */
+/* Full-range sweep: probe every msg_id in [lo, hi] on the given client.
+ *
+ * Phase 10 only logged rc==0 results, which hid msgs that DO exist in the
+ * IDL but need mandatory TLVs we didn't send (e.g. 0x0024 GET_SERVING_SYSTEM,
+ * 0x004D GET_SYS_INFO when called without its mandatory mode TLV). Now we
+ * bucket every rc:
+ *   rc ==   0   accepted, modem executed it
+ *   rc == -43   IDL_LIB_MSG_ID_NOT_FOUND — opcode absent from this service
+ *   rc == other implemented, but our empty request is malformed
+ *
+ * Only "not in IDL" rejects are boring; everything else is a real hit. */
 static void sweep_msg_ids(void *handle, const char *tag,
                           qmi_client_send_msg_sync_fn send_fn,
                           unsigned int lo, unsigned int hi) {
-    int accepted = 0, total = 0;
+    int accepted = 0, needs_tlv = 0, total = 0, nf = 0;
     for (unsigned int id = lo; id <= hi; id++) {
         unsigned char resp[512];
         memset(resp, 0, sizeof(resp));
-        int rc = send_fn(handle, id, NULL, 0, resp, sizeof(resp), 800);
+        int rc = send_fn(handle, id, NULL, 0, resp, sizeof(resp), 600);
         total++;
-        if (rc != 0) continue;
-        accepted++;
-        size_t nz = 0;
-        for (size_t i = 0; i < sizeof(resp); i++) if (resp[i]) nz++;
-        HOUT("SWEEP %-6s 0x%04X rc=0 nz=%zu\n", tag, id, nz);
-        if (nz > 2) {
-            hex_dump_line("   PAYLOAD", resp, nz < 128 ? nz : 128);
+        if (rc == -43) { nf++; continue; }
+        if (rc == 0) {
+            accepted++;
+            size_t nz = 0;
+            for (size_t i = 0; i < sizeof(resp); i++) if (resp[i]) nz++;
+            HOUT("SWEEP %-6s 0x%04X rc=0 nz=%zu\n", tag, id, nz);
+            if (nz > 2) hex_dump_line("   PAYLOAD", resp, nz < 128 ? nz : 128);
+        } else {
+            needs_tlv++;
+            HOUT("SWEEP %-6s 0x%04X rc=%d (impl, needs TLV)\n", tag, id, rc);
         }
     }
-    HOUT("SWEEP %-6s total=%d accepted=%d range=0x%04X..0x%04X\n",
-         tag, total, accepted, lo, hi);
+    HOUT("SWEEP %-6s total=%d accepted=%d needs_tlv=%d not_impl=%d\n",
+         tag, total, accepted, needs_tlv, nf);
 }
+
+/* ---------- Phase 11: walk qmi_idl_service_object_s_t struct ----------
+ *
+ * A QMI service object is a read-only descriptor with this layout (stable
+ * across ~all MSM CCI stacks from SDX5x to X7x; see libqmi_encdec.so):
+ *
+ *   struct qmi_idl_service_object_s_t {
+ *       uint32_t library_version;          // +0x00
+ *       uint32_t idl_version;              // +0x04
+ *       uint32_t service_id;               // +0x08
+ *       uint32_t max_msg_len;              // +0x0C
+ *       const qmi_idl_message_entry *req;  // +0x10
+ *       const qmi_idl_message_entry *resp; // +0x18
+ *       const qmi_idl_message_entry *ind;  // +0x20
+ *       uint32_t num_req;                  // +0x28
+ *       uint32_t num_resp;                 // +0x2C
+ *       uint32_t num_ind;                  // +0x30
+ *       ...
+ *   };
+ *
+ * Each message entry is 16 bytes on 64-bit:
+ *   struct qmi_idl_message_entry {
+ *       uint16_t msg_id;
+ *       uint16_t flags;       // often 0
+ *       uint32_t max_size;    // c-struct size for this msg
+ *       const void *tlv_desc; // ptr to TLV descriptor array
+ *   };
+ *
+ * With max_size for every msg_id we can finally send valid requests:
+ * pass a zeroed buffer of exactly that many bytes as the c_struct.
+ * The encoder reads only optional-field-present flags at fixed offsets
+ * (all zero → "not present") and emits a header-only TLV stream.
+ *
+ * For /vendor/lib64/libqmi_encdec.so the layout is identical, because
+ * the same libqmi_encdec defines the accessor for both libqmiservices
+ * and libqmiextservices.
+ *
+ * We're conservative: dump only if the pointers look sane (inside
+ * readable memory) and abort the walk on the first suspicious entry.
+ */
+#define IDL_DUMP_MAX 256
+
+typedef struct {
+    uint16_t msg_id;
+    uint16_t flags;
+    uint32_t max_size;
+    const void *tlv_desc;
+} qmi_idl_msg_entry_t;
+
+static int is_probably_readable(const void *p) {
+    if (!p) return 0;
+    /* Read one byte through /proc/self/pagemap would be ideal; here we
+     * just check alignment and a sensible upper bound. Fault reads are
+     * caught by signal handlers we don't install — so only call this on
+     * pointers we at least BELIEVE are inside a mapped .rodata. */
+    uintptr_t u = (uintptr_t)p;
+    if (u < 0x1000) return 0;              /* NULL / low pages */
+    if (u & 0x1) return 0;                 /* must be aligned */
+    if (u > 0x7FFFFFFFFFFFULL) return 0;   /* userspace cap */
+    return 1;
+}
+
+static void dump_service_object_table(const char *tag, const void *sobj) {
+    if (!is_probably_readable(sobj)) {
+        HOUT("IDL %-6s service_object not readable %p\n", tag, sobj);
+        return;
+    }
+    const uint8_t *p = (const uint8_t *)sobj;
+    uint32_t library_version = *(const uint32_t *)(p + 0x00);
+    uint32_t idl_version     = *(const uint32_t *)(p + 0x04);
+    uint32_t service_id      = *(const uint32_t *)(p + 0x08);
+    uint32_t max_msg_len     = *(const uint32_t *)(p + 0x0C);
+    const qmi_idl_msg_entry_t *req_tbl  =
+        *(const qmi_idl_msg_entry_t **)(p + 0x10);
+    const qmi_idl_msg_entry_t *resp_tbl =
+        *(const qmi_idl_msg_entry_t **)(p + 0x18);
+    const qmi_idl_msg_entry_t *ind_tbl  =
+        *(const qmi_idl_msg_entry_t **)(p + 0x20);
+    uint32_t num_req  = *(const uint32_t *)(p + 0x28);
+    uint32_t num_resp = *(const uint32_t *)(p + 0x2C);
+    uint32_t num_ind  = *(const uint32_t *)(p + 0x30);
+
+    HOUT("IDL %-6s libver=0x%08x idlver=0x%08x service_id=0x%x max_msg_len=%u\n",
+         tag, library_version, idl_version, service_id, max_msg_len);
+    HOUT("IDL %-6s num_req=%u num_resp=%u num_ind=%u\n",
+         tag, num_req, num_resp, num_ind);
+    HOUT("IDL %-6s tables req=%p resp=%p ind=%p\n",
+         tag, (const void *)req_tbl, (const void *)resp_tbl, (const void *)ind_tbl);
+
+    /* Sanity-check ranges. Legit IDL tables for NAS have ~200 entries. */
+    if (num_req > 2048 || num_resp > 2048 || num_ind > 2048) {
+        HOUT("IDL %-6s sanity FAIL — struct offsets might differ on this stack\n", tag);
+        return;
+    }
+
+    if (is_probably_readable(req_tbl) && num_req > 0) {
+        uint32_t n = num_req > IDL_DUMP_MAX ? IDL_DUMP_MAX : num_req;
+        HOUT("IDL %-6s REQ table (%u entries):\n", tag, n);
+        for (uint32_t i = 0; i < n; i++) {
+            HOUT("  REQ  0x%04X flags=0x%04x max_size=%u tlv=%p\n",
+                 req_tbl[i].msg_id, req_tbl[i].flags,
+                 req_tbl[i].max_size, req_tbl[i].tlv_desc);
+        }
+    }
+    if (is_probably_readable(resp_tbl) && num_resp > 0) {
+        uint32_t n = num_resp > IDL_DUMP_MAX ? IDL_DUMP_MAX : num_resp;
+        HOUT("IDL %-6s RESP table (%u entries):\n", tag, n);
+        for (uint32_t i = 0; i < n; i++) {
+            HOUT("  RESP 0x%04X flags=0x%04x max_size=%u tlv=%p\n",
+                 resp_tbl[i].msg_id, resp_tbl[i].flags,
+                 resp_tbl[i].max_size, resp_tbl[i].tlv_desc);
+        }
+    }
+    if (is_probably_readable(ind_tbl) && num_ind > 0) {
+        uint32_t n = num_ind > IDL_DUMP_MAX ? IDL_DUMP_MAX : num_ind;
+        HOUT("IDL %-6s IND  table (%u entries):\n", tag, n);
+        for (uint32_t i = 0; i < n; i++) {
+            HOUT("  IND  0x%04X flags=0x%04x max_size=%u tlv=%p\n",
+                 ind_tbl[i].msg_id, ind_tbl[i].flags,
+                 ind_tbl[i].max_size, ind_tbl[i].tlv_desc);
+        }
+    }
+}
+
+/* Extra CCI/IDL symbols we probe for — lets us encode+decode arbitrary
+ * TLV-formatted requests/responses without having the IDL headers. */
+static const char *g_raw_cci_syms[] = {
+    "qmi_client_send_raw_msg_async",
+    "qmi_client_send_raw_msg_sync",
+    "qmi_idl_message_encode",
+    "qmi_idl_message_decode",
+    "qmi_idl_get_max_service_len",
+    "qmi_idl_service_message_db_set_ranges",
+    "qmi_client_message_db_get_decode_ranges",
+    "qmi_client_message_db_get_encode_ranges",
+    "qmi_idl_tlv_encode",
+    "qmi_idl_tlv_decode",
+    NULL,
+};
 
 static void try_cci_full_rt(const char *tag,
                             const char *accessor_sym,
@@ -627,6 +802,19 @@ static void try_cci_full_rt(const char *tag,
     }
     release_fn(handle);
     HOUT("SEND %-6s done, released\n", tag);
+}
+
+/* Safely dump the service object's message table with a SEGV-handler
+ * guard — if our inferred struct offsets are wrong for this build of
+ * libqmi_encdec, we abort the dump instead of crashing the helper. */
+static void dump_service_object_guarded(const char *tag, const void *sobj) {
+    if (sigsetjmp(g_fault_jmp, 1) == 0) {
+        g_fault_armed = 1;
+        dump_service_object_table(tag, sobj);
+        g_fault_armed = 0;
+    } else {
+        HOUT("IDL %-6s SIGSEGV — struct offsets differ on this stack, aborting dump\n", tag);
+    }
 }
 
 /* ---------- Phase 8: .rodata string scan ----------
@@ -781,6 +969,25 @@ static void probe(void) {
     try_cci_ping("DMS",
                  "dms_get_service_object_internal_v01",
                  "dms_qmi_idl_service_object_v01");
+
+    /* -------- PHASE 11a: extra CCI/IDL raw-send symbol probe -------- */
+    HOUT("---- PHASE 11a: raw-send / encoder API probe ----\n");
+    for (int s = 0; g_raw_cci_syms[s]; s++) {
+        probe_sym(g_raw_cci_syms[s], 0);
+    }
+
+    /* -------- PHASE 11b: walk qmi_idl_service_object_s_t struct for NAS + NAS_EXT + DMS -------- */
+    HOUT("---- PHASE 11b: IDL service-object table dump ----\n");
+    install_fault_handler();
+    void *sobj_nas    = lookup_service_obj("nas_get_service_object_internal_v01",
+                                           "nas_qmi_idl_service_object_v01");
+    void *sobj_nasext = lookup_service_obj("nas_ext_get_service_object_internal_v01",
+                                           "nas_ext_qmi_idl_service_object_v01");
+    void *sobj_dms    = lookup_service_obj("dms_get_service_object_internal_v01",
+                                           "dms_qmi_idl_service_object_v01");
+    if (sobj_nas)    dump_service_object_guarded("NAS",    sobj_nas);
+    if (sobj_nasext) dump_service_object_guarded("NASEXT", sobj_nasext);
+    if (sobj_dms)    dump_service_object_guarded("DMS",    sobj_dms);
 
     /* -------- PHASE 9: live CCI round-trip (init + send + parse rc) -------- */
     HOUT("---- PHASE 9: CCI full round-trip probe ----\n");
