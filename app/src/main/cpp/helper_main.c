@@ -728,22 +728,25 @@ static void sweep_msg_ids(void *handle, const char *tag,
          tag, total, accepted, needs_tlv, nf);
 }
 
-/* ---------- Phase 11: walk qmi_idl_service_object_s_t struct ----------
+/* ---------- Phase 11/13: walk qmi_idl_service_object_s_t struct ----------
  *
- * A QMI service object is a read-only descriptor with this layout (stable
- * across ~all MSM CCI stacks from SDX5x to X7x; see libqmi_encdec.so):
+ * Phase 11 guessed the layout wrong. Phase 12's 128-byte hex dump of
+ * the real NAS / NAS_EXT / DMS service objects on X70/HyperOS pinned
+ * the actual layout:
  *
- *   struct qmi_idl_service_object_s_t {
- *       uint32_t library_version;          // +0x00
- *       uint32_t idl_version;              // +0x04
- *       uint32_t service_id;               // +0x08
- *       uint32_t max_msg_len;              // +0x0C
- *       const qmi_idl_message_entry *req;  // +0x10
- *       const qmi_idl_message_entry *resp; // +0x18
- *       const qmi_idl_message_entry *ind;  // +0x20
- *       uint32_t num_req;                  // +0x28
- *       uint32_t num_resp;                 // +0x2C
- *       uint32_t num_ind;                  // +0x30
+ *   struct qmi_idl_service_object_s_t {          // NAS    NASEXT  DMS
+ *       uint32_t library_version;   // +0x00        6       6       6
+ *       uint32_t idl_version;       // +0x04        1       1       1
+ *       uint32_t service_id;        // +0x08        3       3       2
+ *       uint32_t max_msg_len;       // +0x0C    0x8F23   0x0028  0x3017
+ *       uint16_t num_req;           // +0x10    0x00E2   0x000D  0x0051
+ *       uint16_t num_resp;          // +0x12    0x00E2   0x000D  0x0051
+ *       uint32_t num_ind;           // +0x14    0x51     0x0C    0x0C
+ *       const qmi_idl_msg_entry_t *req;   // +0x18 (u64 ptr)
+ *       const qmi_idl_msg_entry_t *resp;  // +0x20 (u64 ptr)
+ *       const qmi_idl_msg_entry_t *ind;   // +0x28 (u64 ptr)
+ *       const void *ranges_tbl;           // +0x30 (u64 ptr)
+ *       uint64_t   total_msg_len;         // +0x38 (u64)
  *       ...
  *   };
  *
@@ -799,15 +802,15 @@ static void dump_service_object_table(const char *tag, const void *sobj) {
     uint32_t idl_version     = *(const uint32_t *)(p + 0x04);
     uint32_t service_id      = *(const uint32_t *)(p + 0x08);
     uint32_t max_msg_len     = *(const uint32_t *)(p + 0x0C);
+    uint16_t num_req         = *(const uint16_t *)(p + 0x10);
+    uint16_t num_resp        = *(const uint16_t *)(p + 0x12);
+    uint32_t num_ind         = *(const uint32_t *)(p + 0x14);
     const qmi_idl_msg_entry_t *req_tbl  =
-        *(const qmi_idl_msg_entry_t **)(p + 0x10);
-    const qmi_idl_msg_entry_t *resp_tbl =
         *(const qmi_idl_msg_entry_t **)(p + 0x18);
-    const qmi_idl_msg_entry_t *ind_tbl  =
+    const qmi_idl_msg_entry_t *resp_tbl =
         *(const qmi_idl_msg_entry_t **)(p + 0x20);
-    uint32_t num_req  = *(const uint32_t *)(p + 0x28);
-    uint32_t num_resp = *(const uint32_t *)(p + 0x2C);
-    uint32_t num_ind  = *(const uint32_t *)(p + 0x30);
+    const qmi_idl_msg_entry_t *ind_tbl  =
+        *(const qmi_idl_msg_entry_t **)(p + 0x28);
 
     HOUT("IDL %-6s libver=0x%08x idlver=0x%08x service_id=0x%x max_msg_len=%u\n",
          tag, library_version, idl_version, service_id, max_msg_len);
@@ -1148,11 +1151,11 @@ static void probe(void) {
     if (sobj_nasext) dump_service_object_guarded("NASEXT", sobj_nasext);
     if (sobj_dms)    dump_service_object_guarded("DMS",    sobj_dms);
 
-    /* -------- PHASE 12a: raw hex dump of service-object first 128 bytes + get_max_service_len -------- */
-    HOUT("---- PHASE 12a: service-object hex dump + max_service_len ----\n");
-    if (sobj_nas)    { dump_service_object_bytes("NAS",    sobj_nas,    128); call_max_service_len("NAS",    sobj_nas); }
-    if (sobj_nasext) { dump_service_object_bytes("NASEXT", sobj_nasext, 128); call_max_service_len("NASEXT", sobj_nasext); }
-    if (sobj_dms)    { dump_service_object_bytes("DMS",    sobj_dms,    128); call_max_service_len("DMS",    sobj_dms); }
+    /* -------- PHASE 12a: raw hex dump of service-object first 128 bytes (kept for paranoia) -------- */
+    HOUT("---- PHASE 12a: service-object hex dump ----\n");
+    if (sobj_nas)    dump_service_object_bytes("NAS",    sobj_nas,    128);
+    if (sobj_nasext) dump_service_object_bytes("NASEXT", sobj_nasext, 128);
+    if (sobj_dms)    dump_service_object_bytes("DMS",    sobj_dms,    128);
 
     /* -------- PHASE 12b: raw-msg send via qmi_client_send_raw_msg_sync -------- */
     HOUT("---- PHASE 12b: raw-send (TLV-layer) probe ----\n");
@@ -1186,6 +1189,34 @@ static void probe(void) {
                     probe_raw_send(h, "NASEXT", raw_fn,
                                    g_nasext_known_opcodes[i], NULL, 0, NULL);
                 }
+
+                /* Phase 13c: send speculative TLV payloads to the 5 NASEXT
+                 * opcodes that rejected empty body with "needs TLV".
+                 *
+                 * We try common TLV layouts that vendor lock requests use:
+                 *   A) TLV 0x01 len=4 value=00*4   — single u32 param
+                 *   B) TLV 0x01 len=8 value=00*8   — pair of u32 (EARFCN+PCI)
+                 *   C) TLV 0x01 len=1 value=00     — single byte enable/mode
+                 *
+                 * If any of A/B/C turns INVALID_ARG (err=1) into SUCCESS
+                 * (err=0) or into a different error like NO_ENTRY_FOUND
+                 * (err=15) — we've found the expected payload shape. */
+                static const unsigned int targets[] = { 0x007A, 0x00A1, 0x00A4, 0x00DD, 0x00E2, 0 };
+                static const unsigned char tlv_u32_zero[]    = { 0x01, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00 };
+                static const unsigned char tlv_u32u32_zero[] = { 0x01, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+                static const unsigned char tlv_u8_zero[]     = { 0x01, 0x01, 0x00, 0x00 };
+                for (int i = 0; targets[i]; i++) {
+                    HOUT("  spec-A 0x%04X TLV01 u32=0:\n", targets[i]);
+                    probe_raw_send(h, "NASEXT", raw_fn, targets[i],
+                                   tlv_u32_zero, sizeof(tlv_u32_zero), "spec_u32");
+                    HOUT("  spec-B 0x%04X TLV01 u32+u32=0:\n", targets[i]);
+                    probe_raw_send(h, "NASEXT", raw_fn, targets[i],
+                                   tlv_u32u32_zero, sizeof(tlv_u32u32_zero), "spec_u32u32");
+                    HOUT("  spec-C 0x%04X TLV01 u8=0:\n", targets[i]);
+                    probe_raw_send(h, "NASEXT", raw_fn, targets[i],
+                                   tlv_u8_zero, sizeof(tlv_u8_zero), "spec_u8");
+                }
+
                 HOUT("--- NASEXT full sweep ---\n");
                 sweep_raw_all_accepted(h, "NASEXT", raw_fn, 0x0001, 0x01FF);
                 release_fn(h);
