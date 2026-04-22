@@ -1167,81 +1167,66 @@ static int copy_file(const char *src, const char *dst) {
     return 0;
 }
 
+/* Helper shipped as libqdiag_helper_exec.so in jniLibs. Copy it out of
+ * nativeLibraryDir into /data/local/tmp (which is exec-friendly and
+ * owned by shell), chmod +x, run from there. The copy runs as root so
+ * writes to /data/local/tmp are always allowed.
+ *
+ * The helper runs OUTSIDE our classloader linker namespace (it's a fresh
+ * exec'd process), so its dlopen() is not constrained by clns-1.
+ */
+#define HELPER_SRC_NAME  "libqdiag_helper_exec.so"
+#define HELPER_DST_PATH  "/data/local/tmp/qdiag_helper_exec"
+
 JNIEXPORT jint JNICALL
 Java_com_qdiag_bandlock_diag_DiagNative_qmiVendorProbe(
-        JNIEnv *env, jclass clz, jstring jDestDir) {
+        JNIEnv *env, jclass clz, jstring jNativeLibDir) {
     (void)clz;
 
-    const char *destDir = (*env)->GetStringUTFChars(env, jDestDir, NULL);
-    if (!destDir) return 0;
-    LOGI("vendor-qmi: dest dir = %s", destDir);
+    const char *nativeLibDir = (*env)->GetStringUTFChars(env, jNativeLibDir, NULL);
+    if (!nativeLibDir) return 0;
 
-    /* Make sure dir exists (root may have to create it). */
-    mkdir(destDir, 0755);
-    chmod(destDir, 0755);
+    char src[512];
+    snprintf(src, sizeof(src), "%s/%s", nativeLibDir, HELPER_SRC_NAME);
+    LOGI("vendor-qmi: helper src = %s", src);
 
-    /* Libraries to stage (in dep order for load). */
-    static const char *names[] = {
-        "libqmi_cci.so",
-        "libqmi_common_so.so",
-        "libqmi_encdec.so",
-        "libqmi_csi.so",
-        "libqmi_client_helper.so",
-        "libqmi_client_qmux.so",
-        NULL,
-    };
-
-    char src[256], dst[512];
-    for (int i = 0; names[i]; i++) {
-        snprintf(src, sizeof(src), "/vendor/lib64/%s", names[i]);
-        snprintf(dst, sizeof(dst), "%s/%s", destDir, names[i]);
-        if (copy_file(src, dst) != 0) {
-            LOGE("vendor-qmi: stage FAIL %s", names[i]);
-        }
+    int rc_cp = copy_file(src, HELPER_DST_PATH);
+    (*env)->ReleaseStringUTFChars(env, jNativeLibDir, nativeLibDir);
+    if (rc_cp != 0) {
+        LOGE("vendor-qmi: helper copy FAIL rc=%d (not extracted? extractNativeLibs=true?)", rc_cp);
+        return 0;
+    }
+    if (chmod(HELPER_DST_PATH, 0755) != 0) {
+        LOGE("vendor-qmi: chmod 0755 %s FAIL: %s", HELPER_DST_PATH, strerror(errno));
     }
 
-    /* dlopen prerequisites, then main library, each from the staged path. */
-    for (int i = 0; names[i] && names[i+1]; i++) {
-        snprintf(dst, sizeof(dst), "%s/%s", destDir, names[i]);
-        (void)try_dlopen(dst);
+    /* Exec helper. We're already root (DiagRootService runs as UID=0), so
+     * `sh -c <helper> probe` inherits default linker namespace. */
+    FILE *pp = popen(HELPER_DST_PATH " probe 2>&1", "r");
+    if (!pp) {
+        LOGE("vendor-qmi: popen FAIL: %s", strerror(errno));
+        return 0;
     }
 
-    snprintf(dst, sizeof(dst), "%s/libqmi_client_qmux.so", destDir);
-    void *h = try_dlopen(dst);
-
-    (*env)->ReleaseStringUTFChars(env, jDestDir, destDir);
-
-    if (!h) {
-        return 0;  /* dlopen refused — linker-namespace refused staged path too */
-    }
-
-    /* Symbols NSG uses (from RE of libqtrun_arch_jni.so). */
-    static const char *syms[] = {
-        "qmi_client_init_instance",
-        "qmi_client_init",
-        "qmi_client_send_msg_sync",
-        "qmi_client_send_msg_async",
-        "qmi_client_release",
-        "qmi_linux_get_internal_use_port",
-        "qmi_linux_get_conn_id_by_name",
-        "qmi_idl_get_service_object_v01",
-        "qmuxd_get_service_object",
-        NULL,
-    };
-    int found = 0;
     int mask = 0;
-    for (int i = 0; syms[i]; i++) {
-        void *p = dlsym(h, syms[i]);
-        if (p) {
-            LOGI("vendor-qmi: dlsym OK %-40s -> %p", syms[i], p);
-            found++;
-            if (i < 16) mask |= (1 << i);
-        } else {
-            LOGI("vendor-qmi: dlsym MISS %s (%s)", syms[i], dlerror());
+    int saw_main_ok = 0;
+    char line[1024];
+    while (fgets(line, sizeof(line), pp)) {
+        /* Strip trailing newline for logging. */
+        size_t n = strlen(line);
+        while (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = 0;
+        LOGI("vendor-qmi[helper]: %s", line);
+        if (strncmp(line, "MAIN OK", 7) == 0) saw_main_ok = 1;
+        if (strncmp(line, "MASK ", 5) == 0) {
+            /* "MASK 0xXXXX N/M" */
+            unsigned m = 0;
+            if (sscanf(line + 5, "0x%x", &m) == 1) mask = (int)m;
         }
     }
-    LOGI("vendor-qmi: %d/%d symbols resolved, mask=0x%04X", found, (int)(sizeof(syms)/sizeof(*syms))-1, mask);
+    int wstat = pclose(pp);
+    LOGI("vendor-qmi: helper exit status=0x%X main_ok=%d mask=0x%04X",
+         wstat, saw_main_ok, mask);
 
-    /* Keep handle open so future transactions can reuse. */
-    return (jint)(0x10000 | mask);
+    if (!saw_main_ok) return 0;
+    return (jint)(0x10000 | (mask & 0xFFFF));
 }

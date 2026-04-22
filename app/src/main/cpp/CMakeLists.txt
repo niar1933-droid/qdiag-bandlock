@@ -21,3 +21,17 @@ find_library(log-lib log)
 target_link_libraries(qdiag_native ${log-lib})
 
 target_compile_options(qdiag_native PRIVATE -Wall -Wextra -Wno-unused-parameter)
+
+# ------------------------------------------------------------------
+# qdiag_helper — standalone ELF executable. We rename its output to
+# libqdiag_helper_exec.so so the Android Gradle Plugin packages it as
+# if it were a shared library (AGP only packages lib*.so from CMake).
+# At runtime we copy it out of nativeLibraryDir and exec it under `su`.
+# ------------------------------------------------------------------
+add_executable(qdiag_helper helper_main.c)
+set_target_properties(qdiag_helper PROPERTIES
+        OUTPUT_NAME "qdiag_helper_exec"
+        PREFIX "lib"
+        SUFFIX ".so")
+target_link_libraries(qdiag_helper ${log-lib} dl)
+target_compile_options(qdiag_helper PRIVATE -Wall -Wextra -Wno-unused-parameter)

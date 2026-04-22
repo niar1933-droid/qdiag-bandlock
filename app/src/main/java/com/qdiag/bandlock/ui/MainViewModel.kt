@@ -346,8 +346,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val earfcn = s.lockEarfcn.toIntOrNull()
         val pci = s.lockPci.toIntOrNull()
         if (earfcn == null || pci == null) { toast("EARFCN and PCI must be integers"); return@withApi }
-        val destDir = java.io.File(getApplication<Application>().filesDir, "qdiag").absolutePath
-        val v = api.qmiVendorProbe(destDir)
+        val nativeLibDir = getApplication<Application>().applicationInfo.nativeLibraryDir
+        val v = api.qmiVendorProbe(nativeLibDir)
         val vHint = if (v == 0) {
             "libqmi_client_qmux.so: NOT LOADABLE (dlopen отвергнут — namespace/SELinux)"
         } else {
