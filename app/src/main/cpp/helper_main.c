@@ -558,6 +558,32 @@ static void probe_send(void *handle, const char *service_tag,
     }
 }
 
+/* Full-range sweep: probe every msg_id in [lo, hi] on the given client,
+ * log only accepted ids (rc == 0) and dump response bytes for the ones
+ * that returned payload > 2 bytes (tiny 2-byte responses are usually
+ * just the success result TLV with no data). */
+static void sweep_msg_ids(void *handle, const char *tag,
+                          qmi_client_send_msg_sync_fn send_fn,
+                          unsigned int lo, unsigned int hi) {
+    int accepted = 0, total = 0;
+    for (unsigned int id = lo; id <= hi; id++) {
+        unsigned char resp[512];
+        memset(resp, 0, sizeof(resp));
+        int rc = send_fn(handle, id, NULL, 0, resp, sizeof(resp), 800);
+        total++;
+        if (rc != 0) continue;
+        accepted++;
+        size_t nz = 0;
+        for (size_t i = 0; i < sizeof(resp); i++) if (resp[i]) nz++;
+        HOUT("SWEEP %-6s 0x%04X rc=0 nz=%zu\n", tag, id, nz);
+        if (nz > 2) {
+            hex_dump_line("   PAYLOAD", resp, nz < 128 ? nz : 128);
+        }
+    }
+    HOUT("SWEEP %-6s total=%d accepted=%d range=0x%04X..0x%04X\n",
+         tag, total, accepted, lo, hi);
+}
+
 static void try_cci_full_rt(const char *tag,
                             const char *accessor_sym,
                             const char *data_sym,
@@ -593,12 +619,11 @@ static void try_cci_full_rt(const char *tag,
         }
     }
     if (scan_vendor_range) {
-        for (int i = 0; g_nasext_range_starts[i]; i++) {
-            unsigned int base = g_nasext_range_starts[i];
-            for (unsigned int off = 0; off < 16; off++) {
-                probe_send(handle, tag, send_fn, base + off, NULL);
-            }
-        }
+        /* Full sweep over the vendor msg_id space — covers everything
+         * the IDL table knows about. Local -43 rejects return instantly,
+         * only true accepts take a modem round-trip, so this stays
+         * fast (usually <2s for 512 ids).  */
+        sweep_msg_ids(handle, tag, send_fn, 0x0001, 0x01FF);
     }
     release_fn(handle);
     HOUT("SEND %-6s done, released\n", tag);
@@ -763,7 +788,7 @@ static void probe(void) {
                     "nas_get_service_object_internal_v01",
                     "nas_qmi_idl_service_object_v01",
                     g_nas_probes,
-                    /* scan_vendor_range = */ 0);
+                    /* scan_vendor_range = */ 1);
     try_cci_full_rt("NASEXT",
                     "nas_ext_get_service_object_internal_v01",
                     "nas_ext_qmi_idl_service_object_v01",
