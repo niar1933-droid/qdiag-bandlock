@@ -398,6 +398,25 @@ typedef int (*qmi_client_init_instance_fn)(
 
 typedef int (*qmi_client_release_fn)(void *client_handle);
 
+typedef int (*qmi_client_send_msg_sync_fn)(
+    void *client_handle,
+    unsigned int msg_id,
+    void *req_c_struct,
+    unsigned int req_c_struct_len,
+    void *resp_c_struct,
+    unsigned int resp_c_struct_len,
+    unsigned int timeout_msecs);
+
+static void hex_dump_line(const char *tag, const unsigned char *buf, size_t n) {
+    char out[512];
+    int pos = 0;
+    size_t cap = (n > 96) ? 96 : n;
+    for (size_t i = 0; i < cap && pos < (int)(sizeof(out) - 4); i++) {
+        pos += snprintf(out + pos, sizeof(out) - pos, "%02X ", buf[i]);
+    }
+    HOUT("%s (%zu bytes): %s%s\n", tag, n, out, (n > cap) ? "..." : "");
+}
+
 static void *lookup_service_obj(const char *accessor_sym, const char *data_sym) {
     /* Prefer calling the *_get_service_object_internal_v01() accessor when
      * present — matches how libqmi_client_qmux uses these IDLs. Fall back
@@ -452,6 +471,137 @@ static void try_cci_ping(const char *tag,
         int rr = release_fn(handle);
         HOUT("CCI %-6s release rc=%d\n", tag, rr);
     }
+}
+
+/* ---------- Phase 9: CCI full round-trip probe ----------
+ *
+ * Now that Phase 7 proved qmi_client_init_instance returns rc=0, we go
+ * one layer deeper: open a real client, call qmi_client_send_msg_sync()
+ * against a shortlist of candidate msg_ids, and log the return codes +
+ * response bytes. The c-struct API in CCI encodes via the service
+ * object's IDL table, so for messages that have an *empty* request
+ * body (no mandatory TLVs) we can pass (NULL, 0) for the request and a
+ * zeroed response buffer for CCI to fill in — even if we can't parse
+ * the c-struct layout without headers, we still learn:
+ *
+ *   rc == 0                    msg exists, modem executed it OK
+ *   rc == QMI_IDL_LIB_NO_ERR   (0) same as above
+ *   rc == QMI_SERVICE_ERR (-4) CCI couldn't find msg_id in service IDL
+ *   rc == -22 / -95            vendor rejected (unsupported / permission)
+ *   rc == QMI_TIMEOUT_ERR      no answer in 5s
+ *
+ * From the delta we can pick the right lock message on X70 without the
+ * proprietary headers.
+ *
+ * Candidates we probe (all have empty/optional request bodies on stock
+ * Qualcomm, so passing (NULL,0) won't malform anything):
+ *   NAS   0x0020 GET_SIGNAL_STRENGTH_REQ   — known-good, just pings
+ *   NAS   0x004D GET_SYS_INFO_REQ          — known-good
+ *   NAS   0x0080 RF_BAND_INFO_REQ          — band inventory
+ *   NAS   0x004A GET_OPERATOR_NAME_DATA    — safe, PLMN query
+ *   NAS   0x0043 GET_SYSTEM_SELECTION_PREFERENCE — read current sys_sel
+ *   NASEXT vendor probes 0x55E0..0x55FF on msg_id stride — brute-force
+ *          the vendor opcode range that historically carries the MSM
+ *          engineering-mode PCI/EARFCN lock commands. Empty body.
+ *   DMS   0x0025 GET_DEVICE_SERIAL_NUMBERS — sanity.
+ */
+typedef struct {
+    unsigned int msg_id;
+    const char  *name;
+} cci_probe_msg_t;
+
+static const cci_probe_msg_t g_nas_probes[] = {
+    { 0x0020, "NAS_GET_SIGNAL_STRENGTH_REQ" },
+    { 0x004D, "NAS_GET_SYS_INFO_REQ" },
+    { 0x0080, "NAS_RF_BAND_INFO_REQ" },
+    { 0x004A, "NAS_GET_OPERATOR_NAME_REQ" },
+    { 0x0043, "NAS_GET_SYS_SELECT_PREF_REQ" },
+    { 0x0099, "NAS_GET_LTE_CPHY_CA_INFO_REQ" },
+    { 0x0074, "NAS_GET_RF_BAND_INFO_REQ_alt" },
+    { 0,      NULL },
+};
+
+static const cci_probe_msg_t g_dms_probes[] = {
+    { 0x0025, "DMS_GET_DEVICE_SERIAL_NUMBERS_REQ" },
+    { 0x0020, "DMS_GET_DEVICE_MODEL_ID_REQ" },
+    { 0,      NULL },
+};
+
+/* Vendor NAS_EXT range: iterate a conservative stride that historically
+ * held the lock/rf-engineering commands on MSM NAS_EXT IDLs. We DON'T
+ * probe 0x00..0x1F (collides with standard NAS) or values we'd consider
+ * dangerous. */
+static const unsigned int g_nasext_range_starts[] = {
+    0x0050, 0x0060, 0x0070, 0x0080, 0x0090, 0x00A0, 0x00B0, 0x00C0,
+    0x55E0, 0x55F0, 0x56A0, 0x56B0,
+    0
+};
+
+static void probe_send(void *handle, const char *service_tag,
+                       qmi_client_send_msg_sync_fn send_fn,
+                       unsigned int msg_id, const char *name) {
+    unsigned char resp[2048];
+    memset(resp, 0, sizeof(resp));
+    int rc = send_fn(handle, msg_id,
+                     /* req */ NULL, 0,
+                     /* resp */ resp, sizeof(resp),
+                     /* timeout_ms */ 3000);
+    /* Try to count how many leading bytes look non-zero (CCI writes the
+     * c-struct in-place; even for unknown layouts this gives us a "did
+     * we get real payload?" signal). */
+    size_t nonzero = 0;
+    for (size_t i = 0; i < sizeof(resp); i++) if (resp[i]) nonzero++;
+    HOUT("SEND %-6s 0x%04X %-34s rc=%4d nz=%zu\n",
+         service_tag, msg_id, name ? name : "(vendor)", rc, nonzero);
+    if (rc == 0 && nonzero > 0) {
+        hex_dump_line("   RESP", resp, nonzero < 128 ? nonzero : 128);
+    }
+}
+
+static void try_cci_full_rt(const char *tag,
+                            const char *accessor_sym,
+                            const char *data_sym,
+                            const cci_probe_msg_t *probes,
+                            int scan_vendor_range) {
+    void *service_obj = lookup_service_obj(accessor_sym, data_sym);
+    if (!service_obj) return;
+
+    qmi_client_init_instance_fn init_fn =
+        (qmi_client_init_instance_fn) dlsym(RTLD_DEFAULT, "qmi_client_init_instance");
+    qmi_client_release_fn release_fn =
+        (qmi_client_release_fn) dlsym(RTLD_DEFAULT, "qmi_client_release");
+    qmi_client_send_msg_sync_fn send_fn =
+        (qmi_client_send_msg_sync_fn) dlsym(RTLD_DEFAULT, "qmi_client_send_msg_sync");
+
+    if (!init_fn || !release_fn || !send_fn) {
+        HOUT("SEND %-6s SKIP: init=%p release=%p send=%p\n",
+             tag, (void *)init_fn, (void *)release_fn, (void *)send_fn);
+        return;
+    }
+
+    void *handle = NULL;
+    int rc = init_fn(service_obj, 0, NULL, NULL, NULL, 5000, &handle);
+    if (rc != 0 || !handle) {
+        HOUT("SEND %-6s init FAIL rc=%d\n", tag, rc);
+        return;
+    }
+    HOUT("SEND %-6s init OK handle=%p — probing messages...\n", tag, handle);
+
+    if (probes) {
+        for (int i = 0; probes[i].name; i++) {
+            probe_send(handle, tag, send_fn, probes[i].msg_id, probes[i].name);
+        }
+    }
+    if (scan_vendor_range) {
+        for (int i = 0; g_nasext_range_starts[i]; i++) {
+            unsigned int base = g_nasext_range_starts[i];
+            for (unsigned int off = 0; off < 16; off++) {
+                probe_send(handle, tag, send_fn, base + off, NULL);
+            }
+        }
+    }
+    release_fn(handle);
+    HOUT("SEND %-6s done, released\n", tag);
 }
 
 /* ---------- Phase 8: .rodata string scan ----------
@@ -606,6 +756,24 @@ static void probe(void) {
     try_cci_ping("DMS",
                  "dms_get_service_object_internal_v01",
                  "dms_qmi_idl_service_object_v01");
+
+    /* -------- PHASE 9: live CCI round-trip (init + send + parse rc) -------- */
+    HOUT("---- PHASE 9: CCI full round-trip probe ----\n");
+    try_cci_full_rt("NAS",
+                    "nas_get_service_object_internal_v01",
+                    "nas_qmi_idl_service_object_v01",
+                    g_nas_probes,
+                    /* scan_vendor_range = */ 0);
+    try_cci_full_rt("NASEXT",
+                    "nas_ext_get_service_object_internal_v01",
+                    "nas_ext_qmi_idl_service_object_v01",
+                    /* probes = */ NULL,
+                    /* scan_vendor_range = */ 1);
+    try_cci_full_rt("DMS",
+                    "dms_get_service_object_internal_v01",
+                    "dms_qmi_idl_service_object_v01",
+                    g_dms_probes,
+                    /* scan_vendor_range = */ 0);
 
     /* -------- PHASE 8: .rodata string scan on lock-adjacent libs -------- */
     HOUT("---- PHASE 8: .rodata string scan (LOCK/PCI/EARFCN/CELL/BAND/...) ----\n");
