@@ -335,26 +335,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         toast("Reset bands → ${decodeRc(rc)}")
     }
 
-    /** LTE cell lock via QMI DMS WRITE_NV_ITEM over QRTR.
-     *  DIAG is unavailable on HyperOS (no /dev/diag), so we probe several
-     *  NV item IDs + payload layouts and log each result. See logcat
-     *  `qdiag-jni:V` for per-probe detail. */
+    /** LTE cell lock — NSG-path probe.
+     *  DIAG is unavailable on HyperOS (no /dev/diag) and DMS WRITE_NV_ITEM over
+     *  QRTR returns ACCESS_DENIED on X70. NSG uses /dev/socket/qmux_radio
+     *  (classic qmuxd) to reach a vendor "lockextn" command. This probe tests
+     *  whether qmuxd is reachable from our root context; see logcat tag
+     *  `qdiag-jni:V` for per-candidate open/errno + CTL GET_VERSION reply. */
     fun applyCellLock() = withApi { api ->
         val s = _ui.value
         val earfcn = s.lockEarfcn.toIntOrNull()
         val pci = s.lockPci.toIntOrNull()
         if (earfcn == null || pci == null) { toast("EARFCN and PCI must be integers"); return@withApi }
-        if (!api.qrtrIsOpen()) {
-            val orc = api.qrtrOpen()
-            if (orc != 0) { toast("QRTR open FAILED rc=$orc"); return@withApi }
+        val qmux = api.qmuxProbeCellLock(earfcn, pci)
+        val hint = when (qmux) {
+            0   -> "qmuxd ALIVE + NAS client OK (NSG-path viable)"
+            1   -> "qmuxd reachable, но GET_CLIENT_ID(NAS) молчит"
+            -1  -> "qmuxd СОКЕТ НЕ ОТКРЫЛСЯ — qmuxd на этом ядре выключен"
+            -2  -> "сокет открыт, но нет ответа (peer-cred отверг?)"
+            -3  -> "сокет открыт, read() упал"
+            else -> "qmux-probe rc=$qmux"
         }
-        val rc = api.qrtrProbeCellLock(earfcn, pci)
-        val hint = when {
-            rc == 0 -> "OK (see logcat qdiag-jni for which NV layout worked)"
-            rc == (0x10000 or 0x003E) -> "NOT_SUPPORTED — модем отверг все NV IDs (см. логи)"
-            else -> decodeRc(rc)
-        }
-        toast("Lock cell EARFCN=$earfcn PCI=$pci → $hint")
+        toast("qmux probe → $hint (см. logcat qdiag-jni)")
     }
 
     fun clearCellLock() = withApi { api ->

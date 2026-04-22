@@ -105,6 +105,17 @@ object DiagNative {
     /** Clear any NV-item cell lock set by qrtrProbeCellLock. */
     @JvmStatic external fun qrtrClearCellLock(): Int
 
+    /** NSG-path probe: try every /dev/socket/qmux_radio candidate, log
+     *  per-path fd/errno, and if any opens do a CTL GET_VERSION +
+     *  GET_CLIENT_ID(NAS) handshake to confirm qmuxd is alive.
+     *  Return codes:
+     *      0  — qmuxd reachable AND allocated a NAS client id
+     *      1  — qmuxd reachable but did not answer GET_CLIENT_ID
+     *     -1  — no candidate socket opened at all
+     *     -2/-3 — socket opened but peer refused / read failed
+     */
+    @JvmStatic external fun qmuxProbeCellLock(earfcn: Int, pci: Int): Int
+
     /* ---------- DIAG sniffer (background HDLC-decoded frame capture) ---------- */
 
     @JvmStatic external fun snifferStart(): Boolean

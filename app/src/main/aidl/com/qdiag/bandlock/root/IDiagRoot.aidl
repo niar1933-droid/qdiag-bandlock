@@ -128,4 +128,10 @@ interface IDiagRoot {
 
     /** Clear any NV-item cell lock set by qrtrProbeCellLock. */
     int qrtrClearCellLock();
+
+    /** NSG-path probe: tests qmuxd reachability via /dev/socket/qmux_radio
+     *  and variants. Returns 0 if qmuxd answers CTL GET_CLIENT_ID(NAS),
+     *  1 if version reply but no client id, -1 if no socket opens at all,
+     *  -2/-3 for handshake failures. See logcat tag qdiag-jni. */
+    int qmuxProbeCellLock(int earfcn, int pci);
 }

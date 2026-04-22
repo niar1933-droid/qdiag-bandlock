@@ -833,6 +833,185 @@ Java_com_qdiag_bandlock_diag_DiagNative_qrtrProbeCellLock(
     return (jint)(0x10000 | 0x003E); /* QMI_ERR_NOT_SUPPORTED */
 }
 
+/* ========================================================================== */
+/* QMUX reachability probe — NSG uses /dev/socket/qmux_radio for cell lock.   */
+/* Tries every candidate path (with peer-cred drop to AID_RADIO), logs per-   */
+/* path open/errno; on first successful open does CTL GET_VERSION (0x0021)    */
+/* and NAS client alloc (0x0022 svc=0x03) to verify the socket is actually    */
+/* multiplexable. Returns 0 if any candidate produced a usable qmux channel,  */
+/* negative otherwise.                                                         */
+/* ========================================================================== */
+#include <sys/prctl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <grp.h>
+#include <poll.h>
+
+#define AID_SYSTEM 1000
+#define AID_RADIO  1001
+
+static int probe_connect(const char *path, int abstract, int *out_errno) {
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) { *out_errno = errno; return -1; }
+
+    struct sockaddr_un sa; memset(&sa, 0, sizeof(sa));
+    sa.sun_family = AF_UNIX;
+    socklen_t sl;
+    if (abstract) {
+        sa.sun_path[0] = 0;
+        strncpy(sa.sun_path + 1, path, sizeof(sa.sun_path) - 2);
+        sl = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + strlen(path));
+    } else {
+        strncpy(sa.sun_path, path, sizeof(sa.sun_path) - 1);
+        sl = sizeof(sa);
+    }
+
+    /* Drop to radio uid/gid: qmuxd SO_PEERCRED-checks callers. */
+    uid_t saved_euid = geteuid(); gid_t saved_egid = getegid();
+    int dropped = 0;
+    if (saved_euid == 0) {
+        prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0);
+        gid_t groups[] = { AID_RADIO, AID_SYSTEM };
+        setgroups(2, groups);
+        if (setegid(AID_RADIO) == 0 && seteuid(AID_RADIO) == 0) dropped = 1;
+    }
+    int crc = connect(fd, (struct sockaddr *)&sa, sl);
+    int cerr = errno;
+    if (dropped) {
+        seteuid(saved_euid); setegid(saved_egid);
+        prctl(PR_SET_KEEPCAPS, 0, 0, 0, 0);
+    }
+    if (crc < 0) { *out_errno = cerr; close(fd); return -1; }
+    *out_errno = 0;
+    return fd;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_qmuxProbeCellLock(
+        JNIEnv *env, jclass clz, jint earfcn, jint pci) {
+    (void)env; (void)clz; (void)earfcn; (void)pci;
+
+    static const struct { const char *path; int abstract; } cands[] = {
+        { "/dev/socket/qmux_radio/ril_ipc", 0 },
+        { "/dev/socket/qmux_radio",         0 },
+        { "/dev/socket/qmuxd",              0 },
+        { "qmux_radio",                     1 },   /* abstract namespace */
+        { "qmuxd",                          1 },
+        { NULL, 0 }
+    };
+
+    int best_fd = -1;
+    const char *best_path = NULL;
+    for (int i = 0; cands[i].path; i++) {
+        int e = 0;
+        int fd = probe_connect(cands[i].path, cands[i].abstract, &e);
+        LOGI("qmux-probe[%d] path=%s%s fd=%d errno=%d (%s)",
+             i, cands[i].abstract ? "@" : "", cands[i].path,
+             fd, e, e ? strerror(e) : "ok");
+        if (fd >= 0 && best_fd < 0) {
+            best_fd = fd;
+            best_path = cands[i].path;
+        } else if (fd >= 0) {
+            close(fd);
+        }
+    }
+
+    if (best_fd < 0) {
+        LOGE("qmux-probe: no qmuxd socket reachable");
+        return -1;
+    }
+    LOGI("qmux-probe: first reachable = %s (fd=%d)", best_path, best_fd);
+
+    /* 2) Send CTL GET_VERSION (msg 0x0021, no TLVs) and read reply. */
+    /* qmux frame for CTL request:
+     *   01 | total_len:LE16 | flags=00 | svc=00 | cid=00 | SDU
+     * CTL SDU: flags=0x00 txn=01 msg=0x0021 tlv_len=0x0000
+     */
+    uint8_t frame[] = {
+        0x01,                   /* IFC */
+        0x0C, 0x00,             /* total_len = 12 (hdr 5 + SDU 7) */
+        0x00,                   /* flags */
+        0x00,                   /* svc CTL */
+        0x00,                   /* cid=0 (broadcast) */
+        /* SDU: */
+        0x00,                   /* ctl flags: request */
+        0x01,                   /* txn */
+        0x21, 0x00,             /* msg_id = 0x0021 GET_VERSION_INFO */
+        0x00, 0x00              /* tlv_len */
+    };
+    ssize_t w = write(best_fd, frame, sizeof(frame));
+    LOGI("qmux-probe CTL GET_VERSION write=%zd errno=%d", w, w < 0 ? errno : 0);
+
+    uint8_t rx[512];
+    struct pollfd pfd = { .fd = best_fd, .events = POLLIN };
+    int pr = poll(&pfd, 1, 2000);
+    if (pr <= 0) {
+        LOGE("qmux-probe CTL GET_VERSION: poll rc=%d errno=%d (no reply from qmuxd)",
+             pr, pr < 0 ? errno : 0);
+        close(best_fd);
+        return -2;
+    }
+    ssize_t r = read(best_fd, rx, sizeof(rx));
+    if (r <= 0) {
+        LOGE("qmux-probe CTL GET_VERSION: read=%zd errno=%d (peer rejected us — SO_PEERCRED mismatch?)",
+             r, r < 0 ? errno : 0);
+        close(best_fd);
+        return -3;
+    }
+    /* Hexdump first 32 bytes of reply. */
+    {
+        char line[3 * 32 + 1]; size_t n = r > 32 ? 32 : (size_t)r;
+        for (size_t i = 0; i < n; i++) snprintf(line + i * 3, 4, "%02X ", rx[i]);
+        line[n * 3] = 0;
+        LOGI("qmux-probe CTL GET_VERSION: read=%zd hex=%s%s",
+             r, line, r > 32 ? "..." : "");
+    }
+
+    /* 3) Send CTL GET_CLIENT_ID (msg 0x0022) for NAS (svc=0x03) — validates
+     * the multiplex layer works for a real service. */
+    uint8_t frame2[] = {
+        0x01,
+        0x10, 0x00,             /* total_len = 16 */
+        0x00,
+        0x00,
+        0x00,
+        /* SDU: */
+        0x00,                   /* ctl flags */
+        0x02,                   /* txn */
+        0x22, 0x00,             /* msg_id = 0x0022 GET_CLIENT_ID */
+        0x04, 0x00,             /* tlv_len = 4 */
+        0x01,                   /* TLV 0x01 */
+        0x01, 0x00,             /* TLV len = 1 */
+        0x03                    /* service = NAS */
+    };
+    w = write(best_fd, frame2, sizeof(frame2));
+    LOGI("qmux-probe CTL GET_CLIENT_ID(NAS) write=%zd errno=%d", w, w < 0 ? errno : 0);
+    pr = poll(&pfd, 1, 2000);
+    if (pr > 0) {
+        r = read(best_fd, rx, sizeof(rx));
+        if (r > 0) {
+            char line[3 * 32 + 1]; size_t n = r > 32 ? 32 : (size_t)r;
+            for (size_t i = 0; i < n; i++) snprintf(line + i * 3, 4, "%02X ", rx[i]);
+            line[n * 3] = 0;
+            LOGI("qmux-probe CTL GET_CLIENT_ID reply=%zd hex=%s", r, line);
+            /* Extract assigned CID if present: TLV 0x01 payload = [svc, cid]. */
+            if (r >= 14 && rx[0] == 0x01 && rx[7] == 0x01 /* resp flag */) {
+                /* SDU starts at rx[6]; walk TLVs starting at rx[6+7]. */
+                LOGI("qmux-probe OK — qmuxd is reachable and multiplexes NAS");
+                close(best_fd);
+                return 0;
+            }
+        } else {
+            LOGE("qmux-probe CTL GET_CLIENT_ID: read=%zd errno=%d", r, r < 0 ? errno : 0);
+        }
+    } else {
+        LOGE("qmux-probe CTL GET_CLIENT_ID: poll rc=%d", pr);
+    }
+    close(best_fd);
+    /* Got version reply but not client id: qmuxd alive but may not expose NAS. */
+    return 1;
+}
+
 JNIEXPORT jint JNICALL
 Java_com_qdiag_bandlock_diag_DiagNative_qrtrClearCellLock(
         JNIEnv *env, jclass clz) {
