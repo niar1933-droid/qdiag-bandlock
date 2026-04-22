@@ -22,6 +22,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -180,11 +181,19 @@ fun MainScreen(vm: MainViewModel) {
                         .padding(padding)
                         .fillMaxSize(),
                 ) {
-                    if (activePanel == DrawerPanel.None) {
-                        RatPagerSection(state, Modifier.weight(1f))
-                    } else {
-                        RatPagerSection(state, Modifier.heightIn(max = 180.dp))
-                        HorizontalDivider(color = chromeDivider)
+                    val ratModBase =
+                        if (activePanel == DrawerPanel.None) Modifier.weight(1f)
+                        else Modifier.heightIn(max = 180.dp)
+                    val ratMod = if (glass) {
+                        ratModBase
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                            .glassPanel(cornerDp = 22)
+                            .padding(horizontal = 4.dp, vertical = 6.dp)
+                    } else ratModBase
+                    RatPagerSection(state, ratMod)
+                    if (activePanel != DrawerPanel.None) {
+                        if (!glass) HorizontalDivider(color = chromeDivider)
                         Box(
                             modifier = if (glass) {
                                 Modifier
@@ -217,7 +226,9 @@ fun MainScreen(vm: MainViewModel) {
             }
         }
     }
-    if (glass) GlassBackdrop { ui() } else ui()
+    CompositionLocalProvider(LocalDesignVariant provides variant) {
+        if (glass) GlassBackdrop { ui() } else ui()
+    }
 }
 
 private fun rootShort(s: RootClient.Status): String = when (s) {

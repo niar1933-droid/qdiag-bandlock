@@ -329,10 +329,14 @@ fun CellTable(rat: Rat, rows: List<CellRow>) {
 
 @Composable
 fun RatPage(snap: RatSnapshot) {
+    val isGlass = LocalDesignVariant.current == DesignVariant.Glass
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(NsgColors.Background),
+            .then(
+                if (isGlass) Modifier
+                else Modifier.background(NsgColors.Background),
+            ),
     ) {
         RatHeader(snap.rat, snap.available)
         if (!snap.available) {

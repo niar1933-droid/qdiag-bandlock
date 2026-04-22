@@ -5,6 +5,7 @@ import android.os.Environment
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.qdiag.bandlock.qmi.BandCatalog
 import com.qdiag.bandlock.qmi.BandMask
 import com.qdiag.bandlock.root.IDiagRoot
 import com.qdiag.bandlock.root.RootClient
@@ -64,12 +65,18 @@ data class SniffFrame(
 
 private const val MAX_SNIFFER_UI_FRAMES = 500
 
+private fun defaultCatalogLteMask(): BandMask =
+    BandCatalog.LTE.fold(BandMask.NONE) { acc, e -> acc.with(e.number, true) }
+
+private fun defaultCatalogNrMask(): BandMask =
+    BandCatalog.NR.fold(BandMask.NONE) { acc, e -> acc.with(e.number, true) }
+
 data class UiState(
     val rootStatus: RootClient.Status = RootClient.Status.Unknown,
     val apiBound: Boolean = false,
     val diagOpen: Boolean = false,
-    val lteMask: BandMask = BandMask.ALL,
-    val nrMask: BandMask = BandMask.ALL,
+    val lteMask: BandMask = defaultCatalogLteMask(),
+    val nrMask: BandMask = defaultCatalogNrMask(),
     val snapshots: Map<Rat, RatSnapshot> = emptyMap(),
     val lockEarfcn: String = "",
     val lockPci: String = "",
@@ -242,10 +249,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _ui.value = _ui.value.copy(nrMask = _ui.value.nrMask.with(band, enabled))
     }
     fun setAllLte(on: Boolean) {
-        _ui.value = _ui.value.copy(lteMask = if (on) BandMask.ALL else BandMask.NONE)
+        _ui.value = _ui.value.copy(lteMask = if (on) defaultCatalogLteMask() else BandMask.NONE)
     }
     fun setAllNr(on: Boolean) {
-        _ui.value = _ui.value.copy(nrMask = if (on) BandMask.ALL else BandMask.NONE)
+        _ui.value = _ui.value.copy(nrMask = if (on) defaultCatalogNrMask() else BandMask.NONE)
     }
 
     fun setLockInput(earfcn: String, pci: String) {
@@ -313,7 +320,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun resetBandPreference() = withApi { api ->
         if (!ensureDiagOpen(api)) return@withApi
         val rc = api.resetBandPreference()
-        _ui.value = _ui.value.copy(lteMask = BandMask.ALL, nrMask = BandMask.ALL)
+        _ui.value = _ui.value.copy(lteMask = defaultCatalogLteMask(), nrMask = defaultCatalogNrMask())
         toast("Reset bands → ${decodeRc(rc)}")
     }
 
