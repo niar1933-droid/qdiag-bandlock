@@ -475,42 +475,53 @@ Java_com_qdiag_bandlock_diag_DiagNative_qrtrSetBandPref(
 
     /* Build TLVs for QMI NAS SET_SYSTEM_SELECTION_PREFERENCE (0x0033).
      *
-     * Dropped TLV 0x11 ("legacy Band Preference"): that is the pre-LTE
-     * GSM/UMTS/CDMA band bitmap — stuffing LTE bits there is interpreted
-     * as garbage by the X70 modem, which replies QMI_ERR_MALFORMED_MSG.
+     * Per libqmi nas.json:
+     *   0x11 Mode Preference            u16   (2 bytes)
+     *   0x12 Band Preference            u64   (8 bytes, legacy GSM/UMTS)
+     *   0x15 LTE Band Preference        u64   (8 bytes, deprecated)
+     *   0x1C LTE Band Preference Ext    u64+u64 (16 bytes, bands 1..128)
+     *   0x24 NR5G SA Band Preference    u64+u64 (16 bytes)
+     *   0x25 NR5G NSA Band Preference   u64+u64 (16 bytes)
      *
-     * TLV 0x12 (Mode Preference, u16): set only the RAT bits we're
-     * filtering on.  Valid bits per libqmi:
-     *   b0=CDMA-1x  b1=CDMA-EVDO  b2=GSM  b3=UMTS
-     *   b4=LTE      b5=TDS-CDMA   b6=5GNR
-     * 0x00FF sets undefined bit 7 → some firmwares reject it.  We send
-     * LTE + 5GNR = 0x50 (matches what a user selecting LTE+NR bands
-     * actually wants to lock to). */
+     * Previous build had 0x11 and 0x12 swapped (sending 2 bytes to 0x12
+     * which expects 8 -> MALFORMED_MSG).  This version fixes that and
+     * also picks Mode Preference based on what the user actually
+     * selected, and only emits NR5G TLVs when NR bands were chosen. */
     uint8_t tlvs[128];
     size_t  to = 0;
 
-    /* TLV 0x12 mode pref (u16 LE): LTE (0x10) | 5GNR (0x40) = 0x50 */
-    tlvs[to++] = 0x12;
-    tlvs[to++] = 0x02; tlvs[to++] = 0x00;
-    tlvs[to++] = 0x50; tlvs[to++] = 0x00;
+    int have_lte = (lteLow != 0) || (lteHigh != 0);
+    int have_nr  = (nrLow  != 0) || (nrHigh  != 0);
+    uint16_t mode_pref = 0;
+    if (have_lte) mode_pref |= 0x10;  /* b4 LTE */
+    if (have_nr)  mode_pref |= 0x40;  /* b6 5GNR */
+    if (!mode_pref) mode_pref = 0x10; /* fallback LTE */
 
-    /* TLV 0x1C LTE band pref ext (16 bytes, bands 1..128) */
+    /* TLV 0x11 Mode Preference (u16 LE) */
+    tlvs[to++] = 0x11;
+    tlvs[to++] = 0x02; tlvs[to++] = 0x00;
+    tlvs[to++] = (uint8_t)(mode_pref & 0xFF);
+    tlvs[to++] = (uint8_t)((mode_pref >> 8) & 0xFF);
+
+    /* TLV 0x1C LTE Band Preference Ext (16 bytes, bands 1..128) */
     tlvs[to++] = 0x1C;
     tlvs[to++] = 0x10; tlvs[to++] = 0x00;
     for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((lteLow  >> (8*i)) & 0xFF);
     for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((lteHigh >> (8*i)) & 0xFF);
 
-    /* TLV 0x24 NR5G SA band pref (16 bytes) */
-    tlvs[to++] = 0x24;
-    tlvs[to++] = 0x10; tlvs[to++] = 0x00;
-    for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((nrLow  >> (8*i)) & 0xFF);
-    for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((nrHigh >> (8*i)) & 0xFF);
+    if (have_nr) {
+        /* TLV 0x24 NR5G SA band pref (16 bytes) */
+        tlvs[to++] = 0x24;
+        tlvs[to++] = 0x10; tlvs[to++] = 0x00;
+        for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((nrLow  >> (8*i)) & 0xFF);
+        for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((nrHigh >> (8*i)) & 0xFF);
 
-    /* TLV 0x25 NR5G NSA band pref (16 bytes) */
-    tlvs[to++] = 0x25;
-    tlvs[to++] = 0x10; tlvs[to++] = 0x00;
-    for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((nrLow  >> (8*i)) & 0xFF);
-    for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((nrHigh >> (8*i)) & 0xFF);
+        /* TLV 0x25 NR5G NSA band pref (16 bytes) */
+        tlvs[to++] = 0x25;
+        tlvs[to++] = 0x10; tlvs[to++] = 0x00;
+        for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((nrLow  >> (8*i)) & 0xFF);
+        for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((nrHigh >> (8*i)) & 0xFF);
+    }
 
     uint8_t req[256];
     size_t reqLen = qrtr_build_qmi_request(req, sizeof(req), 0x0033, tlvs, to);
