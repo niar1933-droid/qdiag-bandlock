@@ -473,96 +473,95 @@ Java_com_qdiag_bandlock_diag_DiagNative_qrtrSetBandPref(
     }
     if (rc < 0) return rc;
 
-    /* PROBE MODE.  We do not yet know the authoritative TLV IDs for
-     * SET_SYSTEM_SELECTION_PREFERENCE on the X70 modem in this firmware.
-     * Previous attempts returned QMI_ERR_MALFORMED_MSG (0x0001) for
-     * multiple plausible TLV IDs.  Rather than guess again, we send
-     * several small candidate requests and log each modem reply.  The
-     * first variant that comes back with result==SUCCESS (or any error
-     * other than MALFORMED) identifies the correct TLV IDs.
+    /* Empirically verified on Poco F6 / HyperOS / X70 modem:
+     *   TLV 0x11  Mode Preference        u16 LE      (bits: LTE=0x10, 5GNR=0x40)
+     *   TLV 0x15  LTE Band Preference    u64 LE      (legacy, bands 1..64)
+     * Result SUCCESS/0 from the modem for this exact combination.
+     * TLV 0x1C ("LTE ext", bands 1..128) was rejected MALFORMED by
+     * this firmware, so we stick to 0x15 for LTE.
      *
-     * Every variant is sent as an independent QMI transaction (same
-     * NAS client, different txid).  Results are surfaced via logcat
-     * tag "qrtr" and the final return value encodes the LAST variant
-     * attempted (so Snackbar still shows something). */
+     * NR5G TLV IDs for this firmware are still unknown — we probe a
+     * handful of candidates below when the user also selected NR
+     * bands, and log each reply so we can lock them down next. */
 
-    int have_nr = (nrLow != 0) || (nrHigh != 0); (void)have_nr;
-    uint16_t mode_pref = 0x0010;              /* LTE bit only, minimal */
+    int have_lte = (lteLow != 0);      /* 0x15 only covers low 64 bits */
+    int have_nr  = (nrLow != 0) || (nrHigh != 0);
 
-    typedef struct {
-        const char *name;
-        uint8_t tlvs[64];
-        size_t  tlvs_len;
-    } variant_t;
+    uint16_t mode_pref = 0;
+    if (have_lte) mode_pref |= 0x0010;  /* LTE  */
+    if (have_nr)  mode_pref |= 0x0040;  /* 5GNR */
+    if (!mode_pref) mode_pref = 0x0010; /* fallback */
 
-    variant_t V[8];
-    int nv = 0;
-
-    /* Helper macros to build into variant.tlvs[] */
-    #define VSTART() uint8_t *t = V[nv].tlvs; size_t o = 0
-    #define VPUT8(x)  t[o++] = (uint8_t)(x)
-    #define VPUT16(x) t[o++] = (uint8_t)((x) & 0xFF); t[o++] = (uint8_t)(((x) >> 8) & 0xFF)
-    #define VPUTTLV(id, len) t[o++] = (uint8_t)(id); t[o++] = (uint8_t)((len) & 0xFF); t[o++] = (uint8_t)(((len) >> 8) & 0xFF)
-    #define VPUT_U64(v) do { for (int i = 0; i < 8; i++) t[o++] = (uint8_t)(((v) >> (8*i)) & 0xFF); } while (0)
-    #define VEND(nm) V[nv].name = nm; V[nv].tlvs_len = o; nv++
-
-    /* Variant 0: MODE_PREF=0x11 u16 + LTE_EXT=0x1C u128 */
-    { VSTART(); VPUTTLV(0x11, 2); VPUT16(mode_pref);
-      VPUTTLV(0x1C, 16); VPUT_U64(lteLow); VPUT_U64(lteHigh); VEND("mode11+lte1C"); }
-    /* Variant 1: MODE_PREF=0x11 + LEGACY_LTE=0x15 u64 */
-    { VSTART(); VPUTTLV(0x11, 2); VPUT16(mode_pref);
-      VPUTTLV(0x15, 8); VPUT_U64(lteLow); VEND("mode11+lte15"); }
-    /* Variant 2: MODE_PREF=0x12 + BAND_PREF=0x11 u64 (old qmi_nas.c layout) */
-    { VSTART(); VPUTTLV(0x11, 8); VPUT_U64(lteLow);
-      VPUTTLV(0x12, 2); VPUT16(mode_pref); VEND("legacy11+mode12"); }
-    /* Variant 3: mode only (0x11 u16) */
-    { VSTART(); VPUTTLV(0x11, 2); VPUT16(mode_pref); VEND("mode11-only"); }
-    /* Variant 4: mode only (0x12 u16) */
-    { VSTART(); VPUTTLV(0x12, 2); VPUT16(mode_pref); VEND("mode12-only"); }
-    /* Variant 5: LTE ext only (0x1C u128) */
-    { VSTART(); VPUTTLV(0x1C, 16); VPUT_U64(lteLow); VPUT_U64(lteHigh); VEND("lte1C-only"); }
-    /* Variant 6: legacy LTE only (0x15 u64) */
-    { VSTART(); VPUTTLV(0x15, 8); VPUT_U64(lteLow); VEND("lte15-only"); }
-    /* Variant 7: empty (no TLVs — should succeed as a no-op if framing is OK) */
-    { VSTART(); (void)t; (void)o; VEND("empty"); }
-
-    #undef VSTART
-    #undef VPUT8
-    #undef VPUT16
-    #undef VPUTTLV
-    #undef VPUT_U64
-    #undef VEND
-
-    int last_encoded = (int)(0x10000 | 0x0001);
-    for (int i = 0; i < nv; i++) {
-        uint8_t req[256];
-        size_t reqLen = qrtr_build_qmi_request(req, sizeof(req), 0x0033,
-                                               V[i].tlvs, V[i].tlvs_len);
-        if (!reqLen) { LOGE("probe[%d] %s build fail", i, V[i].name); continue; }
-
-        uint8_t rxb[2048];
-        int m = qrtr_transact(node, port, req, reqLen, rxb, sizeof(rxb), 3000);
-        if (m < 0) {
-            LOGE("probe[%d] %s transact rc=%d", i, V[i].name, m);
-            last_encoded = m;
-            continue;
-        }
-
-        uint16_t mid = 0, result = 0xFFFF, err = 0xFFFF;
-        int prc = qrtr_parse_qmi_response(rxb, (size_t)m, &mid, &result, &err);
-        if (prc < 0) {
-            LOGE("probe[%d] %s bad-frame len=%d", i, V[i].name, m);
-            last_encoded = QDIAG_RC_BAD_FRAME;
-            continue;
-        }
-        LOGI("probe[%d] %s result=%u err=0x%04X (mid=0x%04X)",
-             i, V[i].name, result, err, mid);
-        last_encoded = (result == 0) ? 0 : (int)(0x10000 | err);
-        /* Stop at first success or first non-MALFORMED error (signal). */
-        if (result == 0) return 0;
-        if (err != 0x0001) return last_encoded;
+    /* ---- Primary LTE request (known-good on X70 HyperOS) ---- */
+    uint8_t tlvs[64];
+    size_t to = 0;
+    tlvs[to++] = 0x11; tlvs[to++] = 0x02; tlvs[to++] = 0x00;
+    tlvs[to++] = (uint8_t)(mode_pref & 0xFF);
+    tlvs[to++] = (uint8_t)((mode_pref >> 8) & 0xFF);
+    if (have_lte) {
+        tlvs[to++] = 0x15; tlvs[to++] = 0x08; tlvs[to++] = 0x00;
+        for (int i = 0; i < 8; i++) tlvs[to++] = (uint8_t)((lteLow >> (8*i)) & 0xFF);
     }
-    return last_encoded;
+
+    uint8_t req[256];
+    size_t reqLen = qrtr_build_qmi_request(req, sizeof(req), 0x0033, tlvs, to);
+    if (!reqLen) return QDIAG_RC_BUILD_FAIL;
+
+    uint8_t rx[2048];
+    int n = qrtr_transact(node, port, req, reqLen, rx, sizeof(rx), 5000);
+    if (n < 0) return n;
+
+    uint16_t mid = 0, result = 0xFFFF, err = 0xFFFF;
+    int prc = qrtr_parse_qmi_response(rx, (size_t)n, &mid, &result, &err);
+    if (prc < 0) return QDIAG_RC_BAD_FRAME;
+    LOGI("LTE apply result=%u err=0x%04X", result, err);
+    int primary_rc = (result == 0) ? 0 : (int)(0x10000 | err);
+
+    /* ---- NR5G probe (when user selected NR bands). Try a few candidate
+     * TLV IDs and log each reply.  These are "nice to have" — LTE has
+     * already been applied by the primary request above regardless of
+     * what happens here. */
+    if (have_nr) {
+        typedef struct {
+            const char *name;
+            uint8_t ids[2];   /* up to 2 TLVs */
+            int     count;
+        } nr_variant_t;
+        nr_variant_t NV[] = {
+            { "nr24+25",  {0x24, 0x25}, 2 },  /* most common libqmi layout */
+            { "nr40+41",  {0x40, 0x41}, 2 },  /* vendor-extended range */
+            { "nr50+51",  {0x50, 0x51}, 2 },
+            { "nr30+31",  {0x30, 0x31}, 2 },
+            { "nr24",     {0x24, 0x00}, 1 },
+            { "nr40",     {0x40, 0x00}, 1 },
+        };
+        int NVN = (int)(sizeof(NV) / sizeof(NV[0]));
+        for (int i = 0; i < NVN; i++) {
+            uint8_t t[96]; size_t to2 = 0;
+            t[to2++] = 0x11; t[to2++] = 0x02; t[to2++] = 0x00;
+            t[to2++] = (uint8_t)(mode_pref & 0xFF);
+            t[to2++] = (uint8_t)((mode_pref >> 8) & 0xFF);
+            for (int j = 0; j < NV[i].count; j++) {
+                t[to2++] = NV[i].ids[j]; t[to2++] = 0x10; t[to2++] = 0x00;
+                for (int k = 0; k < 8; k++) t[to2++] = (uint8_t)((nrLow  >> (8*k)) & 0xFF);
+                for (int k = 0; k < 8; k++) t[to2++] = (uint8_t)((nrHigh >> (8*k)) & 0xFF);
+            }
+            uint8_t rq[256];
+            size_t rl = qrtr_build_qmi_request(rq, sizeof(rq), 0x0033, t, to2);
+            uint8_t rxb[2048];
+            int m = qrtr_transact(node, port, rq, rl, rxb, sizeof(rxb), 3000);
+            if (m < 0) { LOGE("nr-probe[%d] %s rc=%d", i, NV[i].name, m); continue; }
+            uint16_t nmid, nresult, nerr;
+            if (qrtr_parse_qmi_response(rxb, (size_t)m, &nmid, &nresult, &nerr) < 0) {
+                LOGE("nr-probe[%d] %s bad-frame", i, NV[i].name); continue;
+            }
+            LOGI("nr-probe[%d] %s result=%u err=0x%04X", i, NV[i].name, nresult, nerr);
+            if (nresult == 0) break;                /* stop on success */
+            if (nerr != 0x0001) break;              /* stop on non-MALFORMED */
+        }
+    }
+
+    return primary_rc;
 }
 
 /* ========================================================================== */
