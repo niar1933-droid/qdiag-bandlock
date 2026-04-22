@@ -26,7 +26,10 @@
 #include <errno.h>
 #include <dlfcn.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
+#include <elf.h>
 
 /* Dual-destination printf: stdout (seen by jni_bridge popen) AND a log file
  * the user can cat from the shell if logcat buffer rolls over. */
@@ -235,6 +238,134 @@ static int probe_sym(const char *sym, int quiet_on_miss) {
     return 0;
 }
 
+/* ---------- ELF dynsym walker (Phase 6) ----------
+ *
+ * X70/HyperOS ships no `*_v01.so` and no `<svc>_get_service_object_v01`, but
+ * it DOES ship libqmiservices.so / libqmiextservices.so / librilqmimiscservices.so
+ * / libril*.so / libqmi_legacy.so — which historically embed the NAS/DMS
+ * handlers under non-standard symbol names (e.g. `nas_send_sys_sel_pref_req`,
+ * `dms_set_operating_mode`, `ril_nas_lock_pci`, ...). Walk each file's
+ * .dynsym by hand and print every defined symbol whose name contains any of
+ * our interest substrings. This is pure read-only mmap of the on-disk ELF;
+ * dlopen isn't required.
+ */
+static const char *g_elf_needle[] = {
+    "nas_", "_nas_", "dms_", "_dms_", "wds_", "_wds_",
+    "service_object", "ser_obj",
+    "band_pref", "bandpref", "band_list",
+    "sys_sel", "sys_selection", "selection_pref",
+    "pci_lock", "pcilock", "earfcn_lock",
+    "cell_lock", "celllock", "lock_cell", "lock_info", "LOCK_",
+    "lte_nas", "nr5g_nas", "nr_nas",
+    "ril_nas", "ril_dms", "ril_wds",
+    NULL,
+};
+
+static int name_matches_needle(const char *name) {
+    if (!name || !*name) return 0;
+    for (int i = 0; g_elf_needle[i]; i++) {
+        if (strstr(name, g_elf_needle[i])) return 1;
+    }
+    return 0;
+}
+
+static void dump_elf_symbols(const char *path) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        HOUT("ELF OPEN_FAIL %s: %s\n", path, strerror(errno));
+        return;
+    }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size < (off_t)sizeof(Elf64_Ehdr)) {
+        HOUT("ELF STAT_FAIL %s\n", path);
+        close(fd);
+        return;
+    }
+    size_t fsize = (size_t)st.st_size;
+    void *map = mmap(NULL, fsize, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (map == MAP_FAILED) {
+        HOUT("ELF MMAP_FAIL %s: %s\n", path, strerror(errno));
+        return;
+    }
+
+    const unsigned char *base = (const unsigned char *)map;
+    /* ELF magic check */
+    if (memcmp(base, ELFMAG, SELFMAG) != 0 ||
+        base[EI_CLASS] != ELFCLASS64 || base[EI_DATA] != ELFDATA2LSB) {
+        HOUT("ELF BAD_MAGIC %s (class=%d data=%d)\n",
+             path, base[EI_CLASS], base[EI_DATA]);
+        munmap(map, fsize);
+        return;
+    }
+
+    const Elf64_Ehdr *eh = (const Elf64_Ehdr *)base;
+    if (eh->e_shoff == 0 || eh->e_shnum == 0 ||
+        eh->e_shoff + (Elf64_Xword)eh->e_shnum * sizeof(Elf64_Shdr) > fsize) {
+        HOUT("ELF BAD_SHT %s\n", path);
+        munmap(map, fsize);
+        return;
+    }
+
+    const Elf64_Shdr *shtab = (const Elf64_Shdr *)(base + eh->e_shoff);
+
+    /* Find .dynsym + linked .dynstr. There's typically exactly one SHT_DYNSYM. */
+    const Elf64_Shdr *dynsym_sh = NULL;
+    for (unsigned i = 0; i < eh->e_shnum; i++) {
+        if (shtab[i].sh_type == SHT_DYNSYM) { dynsym_sh = &shtab[i]; break; }
+    }
+    if (!dynsym_sh) {
+        HOUT("ELF NO_DYNSYM %s\n", path);
+        munmap(map, fsize);
+        return;
+    }
+    if (dynsym_sh->sh_link >= eh->e_shnum) {
+        HOUT("ELF BAD_DYNSTR_LINK %s\n", path);
+        munmap(map, fsize);
+        return;
+    }
+    const Elf64_Shdr *dynstr_sh = &shtab[dynsym_sh->sh_link];
+    if (dynstr_sh->sh_type != SHT_STRTAB ||
+        dynstr_sh->sh_offset + dynstr_sh->sh_size > fsize ||
+        dynsym_sh->sh_offset + dynsym_sh->sh_size > fsize ||
+        dynsym_sh->sh_entsize == 0) {
+        HOUT("ELF BAD_TABLES %s\n", path);
+        munmap(map, fsize);
+        return;
+    }
+
+    const Elf64_Sym *syms = (const Elf64_Sym *)(base + dynsym_sh->sh_offset);
+    const char      *strs = (const char *)(base + dynstr_sh->sh_offset);
+    size_t           nsym = (size_t)(dynsym_sh->sh_size / dynsym_sh->sh_entsize);
+
+    int hits = 0;
+    for (size_t i = 0; i < nsym; i++) {
+        const Elf64_Sym *s = &syms[i];
+        /* Skip undefined (imports), only emit defined exports. */
+        if (s->st_shndx == SHN_UNDEF) continue;
+        /* Only globals and weaks; skip locals (compiler-internal). */
+        unsigned bind = ELF64_ST_BIND(s->st_info);
+        if (bind != STB_GLOBAL && bind != STB_WEAK) continue;
+        /* Only funcs + objects; skip file/section symbols. */
+        unsigned type = ELF64_ST_TYPE(s->st_info);
+        if (type != STT_FUNC && type != STT_OBJECT && type != STT_NOTYPE) continue;
+        if (s->st_name >= dynstr_sh->sh_size) continue;
+        const char *name = strs + s->st_name;
+        if (!name_matches_needle(name)) continue;
+        const char *kind = (type == STT_FUNC) ? "FUNC"
+                         : (type == STT_OBJECT) ? "OBJ"
+                         : "NOT";
+        HOUT("ELFSYM %-48s %4s %s\n", name, kind, path);
+        hits++;
+        if (hits >= 256) { /* paranoid cap per-lib */
+            HOUT("ELFSYM %s HIT_CAP reached\n", path);
+            break;
+        }
+    }
+    if (hits == 0) HOUT("ELFSYM %s NONE\n", path);
+    munmap(map, fsize);
+}
+
 static void probe(void) {
     g_log_fp = fopen("/data/local/tmp/qdiag_helper.log", "w");
     HOUT("=== qdiag_helper probe start ===\n");
@@ -284,6 +415,12 @@ static void probe(void) {
         if (probe_sym(sym, 1)) svc_hits++;
     }
     HOUT("SERVICES %d service objects resolved\n", svc_hits);
+
+    /* -------- PHASE 6: ELF dynsym dump -------- */
+    HOUT("---- PHASE 6: ELF dynsym dump (nas/dms/wds/lock/band/service_object/sys_sel/pci) ----\n");
+    for (int i = 0; i < g_lib_count; i++) {
+        dump_elf_symbols(g_libs[i].path);
+    }
 
     /* -------- Summary (machine-parsed by jni_bridge) -------- */
     HOUT("FOUND %d/%d\n", cci_hits + svc_hits, cci_total + (int)(sizeof(g_service_roots)/sizeof(*g_service_roots)) - 1);
