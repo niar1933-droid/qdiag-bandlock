@@ -132,6 +132,24 @@ object DiagNative {
      */
     @JvmStatic external fun qmiVendorProbe(nativeLibDir: String): Int
 
+    /**
+     * Phase 14 band-lock via Qualcomm CCI (libqmi_cci.so + libqmiservices.so).
+     * Runs `qdiag_helper lock <lteLow> <lteHigh> <nrLow> <nrHigh>` as root,
+     * which opens a NAS client via qmi_client_init_instance and sends
+     * QMI_NAS_SET_SYSTEM_SELECTION_PREFERENCE (0x0033) with the same TLV
+     * layout the DIAG path uses.
+     *
+     * Returns:
+     *   0                         — modem accepted (result_code=0)
+     *   0x00010000 | qmi_result   — modem rejected with a QMI error
+     *   0xFFFF0000 | low16        — transport / helper failure
+     */
+    @JvmStatic external fun qmiCciSetBandPref(
+        nativeLibDir: String,
+        lteLow: Long, lteHigh: Long,
+        nrLow: Long,  nrHigh: Long,
+    ): Int
+
     /* ---------- DIAG sniffer (background HDLC-decoded frame capture) ---------- */
 
     @JvmStatic external fun snifferStart(): Boolean

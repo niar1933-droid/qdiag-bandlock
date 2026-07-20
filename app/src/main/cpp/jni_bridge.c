@@ -1178,6 +1178,74 @@ static int copy_file(const char *src, const char *dst) {
 #define HELPER_SRC_NAME  "libqdiag_helper_exec.so"
 #define HELPER_DST_PATH  "/data/local/tmp/qdiag_helper_exec"
 
+/* Phase 14: CCI band-lock path. Runs the helper binary with
+ * `lock <lte_low_hex> <lte_high_hex> <nr_low_hex> <nr_high_hex>`
+ * and parses stdout for a line like:
+ *   LOCK_RESULT rc=<tr> result_code=<rc> err_code=<ec>
+ * Returns:
+ *   0x00000000 on success (result_code=0)
+ *   0x00010000 | result_code on QMI error
+ *   0xFFFF0000 | low16 of -errno-equivalent on transport failure / no helper
+ */
+JNIEXPORT jint JNICALL
+Java_com_qdiag_bandlock_diag_DiagNative_qmiCciSetBandPref(
+        JNIEnv *env, jclass clz, jstring jNativeLibDir,
+        jlong lteLow, jlong lteHigh, jlong nrLow, jlong nrHigh) {
+    (void)clz;
+
+    const char *nativeLibDir = (*env)->GetStringUTFChars(env, jNativeLibDir, NULL);
+    if (!nativeLibDir) return (jint)0xFFFF0001;
+
+    char src[512];
+    snprintf(src, sizeof(src), "%s/%s", nativeLibDir, HELPER_SRC_NAME);
+    int rc_cp = copy_file(src, HELPER_DST_PATH);
+    (*env)->ReleaseStringUTFChars(env, jNativeLibDir, nativeLibDir);
+    if (rc_cp != 0) {
+        LOGE("cci-lock: helper copy FAIL rc=%d", rc_cp);
+        return (jint)0xFFFF0002;
+    }
+    chmod(HELPER_DST_PATH, 0755);
+
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd),
+             HELPER_DST_PATH " lock 0x%llx 0x%llx 0x%llx 0x%llx 2>&1",
+             (unsigned long long)lteLow, (unsigned long long)lteHigh,
+             (unsigned long long)nrLow,  (unsigned long long)nrHigh);
+    LOGI("cci-lock: %s", cmd);
+
+    FILE *pp = popen(cmd, "r");
+    if (!pp) {
+        LOGE("cci-lock: popen FAIL: %s", strerror(errno));
+        return (jint)0xFFFF0003;
+    }
+
+    int transport_rc = -99;
+    int result_code  = -99;
+    int err_code     = -99;
+    int saw_result   = 0;
+    char line[1024];
+    while (fgets(line, sizeof(line), pp)) {
+        size_t n = strlen(line);
+        while (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = 0;
+        LOGI("cci-lock[helper]: %s", line);
+        const char *p = strstr(line, "LOCK_RESULT");
+        if (p) {
+            if (sscanf(p, "LOCK_RESULT rc=%d result_code=%d err_code=%d",
+                       &transport_rc, &result_code, &err_code) == 3) {
+                saw_result = 1;
+            }
+        }
+    }
+    int wstat = pclose(pp);
+    LOGI("cci-lock: helper exit=0x%X tr=%d rc=%d ec=%d",
+         wstat, transport_rc, result_code, err_code);
+
+    if (!saw_result) return (jint)0xFFFF0004;
+    if (transport_rc != 0) return (jint)(0xFFFF0000 | (transport_rc & 0xFFFF));
+    if (result_code == 0) return 0;
+    return (jint)(0x00010000 | (result_code & 0xFFFF));
+}
+
 JNIEXPORT jint JNICALL
 Java_com_qdiag_bandlock_diag_DiagNative_qmiVendorProbe(
         JNIEnv *env, jclass clz, jstring jNativeLibDir) {

@@ -70,6 +70,14 @@ class DiagRootService : RootService() {
             DiagNative.qmuxProbeCellLock(earfcn, pci)
 
         override fun qmiVendorProbe(nativeLibDir: String): Int = DiagNative.qmiVendorProbe(nativeLibDir)
+
+        override fun cciSetBandPreference(
+            nativeLibDir: String,
+            lteBandMaskLow: Long, lteBandMaskHigh: Long,
+            nrBandMaskLow: Long,  nrBandMaskHigh: Long,
+        ): Int = DiagNative.qmiCciSetBandPref(
+            nativeLibDir, lteBandMaskLow, lteBandMaskHigh, nrBandMaskLow, nrBandMaskHigh,
+        )
     }
 
     companion object { private const val TAG = "DiagRootService" }

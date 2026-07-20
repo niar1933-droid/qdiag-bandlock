@@ -328,6 +328,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         toast("Apply bands → ${decodeRc(rc)}")
     }
 
+    /**
+     * Phase 14: Apply band preference via Qualcomm CCI
+     * (libqmi_cci.so + libqmiservices.so + qmi_client_send_raw_msg_sync).
+     * This is the path we discovered works on X70/HyperOS where
+     * /dev/diag, QRTR and qmuxd are all blocked. Sends the same
+     * QMI_NAS_SET_SYSTEM_SELECTION_PREFERENCE (0x0033) request with
+     * TLVs 0x11, 0x12, 0x1C, 0x24, 0x25.
+     */
+    fun applyBandPreferenceCci() = withApi { api ->
+        val s = _ui.value
+        val nativeLibDir = getApplication<Application>().applicationInfo.nativeLibraryDir
+        val rc = api.cciSetBandPreference(
+            nativeLibDir,
+            s.lteMask.low, s.lteMask.high, s.nrMask.low, s.nrMask.high,
+        )
+        val rcU = rc.toLong() and 0xFFFFFFFFL
+        val hint = when {
+            rc == 0 -> "OK (modem accepted)"
+            (rcU and 0xFFFF0000L) == 0xFFFF0000L -> "transport FAIL code=0x${"%08X".format(rc)}"
+            (rcU and 0xFFFF0000L) == 0x00010000L -> "QMI err=${rc and 0xFFFF}"
+            else -> "rc=0x${"%08X".format(rc)}"
+        }
+        appendLog("cci_set_band_pref rc=0x${"%08X".format(rc)} (LTE=${s.lteMask.enabledBands()} NR=${s.nrMask.enabledBands()})")
+        toast("Apply bands (CCI) → $hint")
+    }
+
     fun resetBandPreference() = withApi { api ->
         if (!ensureDiagOpen(api)) return@withApi
         val rc = api.resetBandPreference()

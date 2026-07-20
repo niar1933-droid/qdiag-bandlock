@@ -43,6 +43,9 @@ fun RatHeader(rat: Rat, available: Boolean) {
         Rat.NR    -> "NR5G"
     }
     val status = if (available) "Testing (Available)" else "Not Available"
+    val glass = LocalDesignVariant.current == DesignVariant.Glass
+    val titleColor = if (glass) GlassColors.AccentRed else NsgColors.Accent
+    val dividerColor = if (glass) GlassColors.DividerSoft else NsgColors.Divider
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -51,12 +54,12 @@ fun RatHeader(rat: Rat, available: Boolean) {
     ) {
         Text(
             text = "$label  •  $status",
-            color = NsgColors.Accent,
+            color = titleColor,
             fontWeight = FontWeight.Bold,
             fontSize = 18.sp,
         )
     }
-    HorizontalDivider(color = NsgColors.Divider, thickness = 1.dp)
+    HorizontalDivider(color = dividerColor, thickness = 1.dp)
 }
 
 /* ------------------------------------------------------------------ */
@@ -73,24 +76,29 @@ private val MonoValue = TextStyle(
 fun MetricRow(
     label: String,
     value: String?,
-    valueColor: Color = NsgColors.TextPrimary,
+    valueColor: Color? = null,
 ) {
+    val glass = LocalDesignVariant.current == DesignVariant.Glass
+    val labelColor = if (glass) GlassColors.TextSecondary else NsgColors.TextLabel
+    val defaultValue = if (glass) GlassColors.TextPrimary else NsgColors.TextPrimary
+    val dimColor = if (glass) GlassColors.TextTertiary else NsgColors.TextDim
+    val resolvedValueColor = valueColor ?: defaultValue
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 4.dp),
+            .padding(horizontal = 12.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
             text = label,
-            color = NsgColors.TextLabel,
-            fontSize = 13.sp,
+            color = labelColor,
+            fontSize = 14.sp,
             modifier = Modifier.weight(1f),
         )
         Text(
             text = value ?: "-",
             style = MonoValue,
-            color = if (value == null) NsgColors.TextDim else valueColor,
+            color = if (value == null) dimColor else resolvedValueColor,
         )
     }
 }
@@ -161,10 +169,11 @@ fun GaugeRow(
             .padding(horizontal = 12.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        val glass = LocalDesignVariant.current == DesignVariant.Glass
         Text(
             text = label,
-            color = NsgColors.TextLabel,
-            fontSize = 13.sp,
+            color = if (glass) GlassColors.TextSecondary else NsgColors.TextLabel,
+            fontSize = 14.sp,
             modifier = Modifier.weight(1f),
         )
         GaugeBar(
@@ -190,10 +199,11 @@ fun DualGaugeRow(
             .padding(horizontal = 12.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        val glass = LocalDesignVariant.current == DesignVariant.Glass
         Text(
             text = label,
-            color = NsgColors.TextLabel,
-            fontSize = 13.sp,
+            color = if (glass) GlassColors.TextSecondary else NsgColors.TextLabel,
+            fontSize = 14.sp,
             modifier = Modifier.weight(1f),
         )
         GaugeBar(leftValue, leftQuality, modifier = Modifier.weight(0.6f))
@@ -241,17 +251,21 @@ fun CellTable(rat: Rat, rows: List<CellRow>) {
         Rat.NR    -> listOf("", "NRARFCN", "PCI", "RSRQ", "RSRP")
         Rat.GSM   -> listOf("", "ARFCN", "BSIC", "C1", "RxLev")
     }
+    val glass = LocalDesignVariant.current == DesignVariant.Glass
+    val headerBg = if (glass) Color.White.copy(alpha = 0.04f) else NsgColors.SurfaceElevated
+    val labelCol = if (glass) GlassColors.TextSecondary else NsgColors.TextLabel
+    val dimCol   = if (glass) GlassColors.TextTertiary else NsgColors.TextDim
     Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(NsgColors.SurfaceElevated)
+                .background(headerBg)
                 .padding(horizontal = 6.dp, vertical = 4.dp),
         ) {
             cols.forEachIndexed { i, h ->
                 Text(
                     h,
-                    color = NsgColors.TextLabel,
+                    color = labelCol,
                     fontSize = 12.sp,
                     modifier = if (i == 0) Modifier.width(28.dp) else Modifier.weight(1f),
                 )
@@ -259,7 +273,7 @@ fun CellTable(rat: Rat, rows: List<CellRow>) {
         }
         if (rows.isEmpty()) {
             Box(Modifier.fillMaxWidth().padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
-                Text("— no cells —", color = NsgColors.TextDim, fontSize = 12.sp)
+                Text("— no cells —", color = dimCol, fontSize = 12.sp)
             }
         } else {
             /* Per-RAT "worst..best" ramps for the inline gauge bars. */
@@ -282,20 +296,20 @@ fun CellTable(rat: Rat, rows: List<CellRow>) {
                 ) {
                     Text(
                         r.label,
-                        color = NsgColors.Accent,
+                        color = if (glass) GlassColors.AccentRed else NsgColors.Accent,
                         fontWeight = FontWeight.Bold,
                         style = MonoValue,
                         modifier = Modifier.width(28.dp),
                     )
                     Text(
                         r.channel?.toString() ?: "-",
-                        color = NsgColors.ChannelHi,
+                        color = if (glass) GlassColors.ChannelBlue else NsgColors.ChannelHi,
                         style = MonoValue,
                         modifier = Modifier.weight(1f),
                     )
                     Text(
                         r.identity?.toString() ?: "-",
-                        color = NsgColors.TextPrimary,
+                        color = if (glass) GlassColors.TextPrimary else NsgColors.TextPrimary,
                         style = MonoValue,
                         modifier = Modifier.weight(1f),
                     )
@@ -348,10 +362,11 @@ fun RatPage(snap: RatSnapshot) {
             }
             return@Column
         }
+        val chBlue = if (isGlass) GlassColors.ChannelBlue else NsgColors.ChannelHi
         MetricRow("3GPP Band",        snap.band)
         MetricRow("RRC State",        snap.rrcState)
-        MetricRow("Channel DL",       snap.channelDl?.toString(), valueColor = NsgColors.ChannelHi)
-        MetricRow("Channel UL",       snap.channelUl?.toString(), valueColor = NsgColors.ChannelHi)
+        MetricRow("Channel DL",       snap.channelDl?.toString(), valueColor = chBlue)
+        MetricRow("Channel UL",       snap.channelUl?.toString(), valueColor = chBlue)
         MetricRow("MCC / MNC",        if (snap.mcc != null) "${snap.mcc} / ${snap.mnc ?: "?"}" else null)
         MetricRow("TAC",              snap.tac?.toString())
         MetricRow("Cell ID",          snap.cellId?.toString())
@@ -391,10 +406,14 @@ fun RatPage(snap: RatSnapshot) {
         snap.timingAdvance?.let {
             MetricRow("Timing Advance", it.toString())
         }
-        HorizontalDivider(color = NsgColors.Divider, thickness = 1.dp, modifier = Modifier.padding(vertical = 6.dp))
+        HorizontalDivider(
+            color = if (isGlass) GlassColors.DividerSoft else NsgColors.Divider,
+            thickness = 1.dp,
+            modifier = Modifier.padding(vertical = 6.dp),
+        )
         Text(
             "Cells",
-            color = NsgColors.TextLabel,
+            color = if (isGlass) GlassColors.TextSecondary else NsgColors.TextLabel,
             fontSize = 12.sp,
             fontWeight = FontWeight.Bold,
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
@@ -409,6 +428,9 @@ fun RatPage(snap: RatSnapshot) {
 
 @Composable
 fun PagerDots(pageCount: Int, currentPage: Int) {
+    val glass = LocalDesignVariant.current == DesignVariant.Glass
+    val activeColor = if (glass) GlassColors.Accent else NsgColors.Accent
+    val inactiveColor = if (glass) GlassColors.TextTertiary else NsgColors.TextDim
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -422,7 +444,7 @@ fun PagerDots(pageCount: Int, currentPage: Int) {
                     .padding(horizontal = 4.dp)
                     .size(if (active) 8.dp else 6.dp)
                     .clip(RoundedCornerShape(50))
-                    .background(if (active) NsgColors.Accent else NsgColors.TextDim),
+                    .background(if (active) activeColor else inactiveColor),
             )
         }
     }
